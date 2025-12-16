@@ -341,16 +341,31 @@ impl TunnelSession {
                         request_sent = true;
                         
                         // Reconstruct HTTP Response Status Line
-                        let status_line = format!("HTTP/1.1 {} {}\r\n", response.status_code(), response.status_text());
+                        // worker::Response doesn't always expose status_text, so we use a default
+                        let status_code = response.status_code();
+                        let status_text = match status_code {
+                            200 => "OK",
+                            201 => "Created",
+                            204 => "No Content",
+                            400 => "Bad Request",
+                            401 => "Unauthorized",
+                            403 => "Forbidden",
+                            404 => "Not Found",
+                            500 => "Internal Server Error",
+                            502 => "Bad Gateway",
+                            503 => "Service Unavailable",
+                            _ => "Unknown",
+                        };
+                        let status_line = format!("HTTP/1.1 {} {}\r\n", status_code, status_text);
                         let mut head = status_line.into_bytes();
 
                         // Reconstruct Headers
-                        if let Ok(headers) = response.headers() {
-                            for pair in headers.entries() {
-                                if let Ok(p) = pair {
-                                    if p.0.to_lowercase() != "transfer-encoding" { // Chunked handled by us
-                                         head.extend_from_slice(format!("{}: {}\r\n", p.0, p.1).as_bytes());
-                                    }
+                        // response.headers() returns &Headers, not Result
+                        let headers = response.headers();
+                        for pair in headers.entries() {
+                            if let Ok(p) = pair {
+                                if p.0.to_lowercase() != "transfer-encoding" { // Chunked handled by us
+                                        head.extend_from_slice(format!("{}: {}\r\n", p.0, p.1).as_bytes());
                                 }
                             }
                         }
@@ -364,22 +379,23 @@ impl TunnelSession {
                         let _ = ws_clone.send_with_bytes(&msg.encode());
 
                         // Stream Body
-                        if let Ok(Some(mut body)) = response.body() {
-                             while let Some(chunk_res) = body.next().await {
-                                 match chunk_res {
-                                     Ok(chunk) => {
-                                         let msg = TunnelMessage::Data {
-                                             stream_id,
-                                             payload: Bytes::from(chunk),
-                                         };
-                                         let _ = ws_clone.send_with_bytes(&msg.encode());
-                                     }
-                                     Err(e) => {
-                                         console_error!("[TunnelSession] Body read error: {:?}", e);
-                                         break;
-                                     }
-                                 }
-                             }
+                        // response.body() returns Option<ResponseBody>, not Result
+                        if let Some(body) = response.body_mut() {
+                                while let Some(chunk_res) = body.next().await {
+                                match chunk_res {
+                                    Ok(chunk) => {
+                                        let msg = TunnelMessage::Data {
+                                            stream_id,
+                                            payload: Bytes::from(chunk),
+                                        };
+                                        let _ = ws_clone.send_with_bytes(&msg.encode());
+                                    }
+                                    Err(e) => {
+                                        console_error!("[TunnelSession] Body read error: {:?}", e);
+                                        break;
+                                    }
+                                }
+                                }
                         }
                         
                         // Close stream
