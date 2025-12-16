@@ -1,8 +1,10 @@
 //! TunnelSession - Durable Object for persistent WebSocket connections
 //!
-//! Uses Socket with Rc<RefCell> for concurrent read/write access
+//! Uses channel-based architecture where spawned task owns Socket exclusively
 
 use bytes::Bytes;
+use futures::channel::mpsc;
+use futures::{FutureExt, SinkExt, StreamExt};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -11,9 +13,10 @@ use wasm_bindgen_futures::spawn_local;
 use worker::*;
 use zks_tunnel_proto::{StreamId, TunnelMessage};
 
-/// Stream state - holds the full socket
+/// Stream state - holds a sender for write requests to the socket task
 struct StreamInfo {
-    socket: Rc<RefCell<Socket>>,
+    /// Channel to send data to be written to the socket
+    write_tx: mpsc::Sender<Bytes>,
 }
 
 #[durable_object]
@@ -91,7 +94,7 @@ impl DurableObject for TunnelSession {
             was_clean
         );
 
-        // Clean up all streams
+        // Clean up all streams - dropping senders will signal tasks to stop
         self.active_streams.borrow_mut().clear();
         Ok(())
     }
@@ -121,11 +124,12 @@ impl TunnelSession {
                 self.handle_connect(ws, stream_id, &host, port).await?;
             }
             TunnelMessage::Data { stream_id, payload } => {
-                self.handle_data(ws, stream_id, &payload).await?;
+                self.handle_data(stream_id, &payload).await?;
             }
             TunnelMessage::Close { stream_id } => {
+                // Remove from map - dropping the sender signals the task to stop
                 self.active_streams.borrow_mut().remove(&stream_id);
-                console_log!("[TunnelSession] Stream {} closed", stream_id);
+                console_log!("[TunnelSession] Stream {} closed by client", stream_id);
             }
             TunnelMessage::DnsQuery { request_id, query } => {
                 self.handle_dns(ws, request_id as u16, &query).await;
@@ -207,62 +211,21 @@ impl TunnelSession {
 
                 console_log!("[TunnelSession] Connected to {}", address);
 
-                // Wrap socket in Rc<RefCell>
-                let socket = Rc::new(RefCell::new(socket));
+                // Create channel for write requests (bounded to prevent memory issues)
+                let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
 
-                // Store in active streams
-                self.active_streams.borrow_mut().insert(
-                    stream_id,
-                    StreamInfo {
-                        socket: socket.clone(),
-                    },
-                );
+                // Store the write sender in active streams
+                self.active_streams
+                    .borrow_mut()
+                    .insert(stream_id, StreamInfo { write_tx });
 
-                // Spawn reader task
+                // Spawn socket handler task - it EXCLUSIVELY owns the socket
                 let ws_clone = ws.clone();
                 let active_streams = self.active_streams.clone();
-                let socket_clone = socket.clone();
 
                 spawn_local(async move {
-                    let mut buffer = vec![0u8; 16384];
-
-                    loop {
-                        // Read from socket - must scope the borrow carefully
-                        let read_result = {
-                            let mut socket_guard = socket_clone.borrow_mut();
-                            socket_guard.read(&mut buffer).await
-                        };
-
-                        match read_result {
-                            Ok(0) => {
-                                // EOF
-                                console_log!("[TunnelSession] Stream {} EOF", stream_id);
-                                break;
-                            }
-                            Ok(n) => {
-                                let msg = TunnelMessage::Data {
-                                    stream_id,
-                                    payload: Bytes::copy_from_slice(&buffer[..n]),
-                                };
-
-                                if ws_clone.send_with_bytes(&msg.encode()).is_err() {
-                                    console_error!("[TunnelSession] Failed to send data to client");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                console_error!("[TunnelSession] Read error: {:?}", e);
-                                break;
-                            }
-                        }
-                    }
-
-                    // Send close notification
-                    let close_msg = TunnelMessage::Close { stream_id };
-                    let _ = ws_clone.send_with_bytes(&close_msg.encode());
-                    active_streams.borrow_mut().remove(&stream_id);
-
-                    console_log!("[TunnelSession] Reader exiting for stream {}", stream_id);
+                    Self::run_socket_loop(socket, write_rx, ws_clone, stream_id, active_streams)
+                        .await;
                 });
 
                 console_log!("[TunnelSession] Stream {} ready", stream_id);
@@ -276,35 +239,103 @@ impl TunnelSession {
         Ok(())
     }
 
-    async fn handle_data(&self, ws: &WebSocket, stream_id: StreamId, payload: &[u8]) -> Result<()> {
-        let socket_opt = {
-            let streams = self.active_streams.borrow();
-            streams.get(&stream_id).map(|info| info.socket.clone())
-        };
+    /// Socket handler loop - exclusively owns the Socket
+    /// Handles both reading from socket and writing client data to socket
+    async fn run_socket_loop(
+        mut socket: Socket,
+        mut write_rx: mpsc::Receiver<Bytes>,
+        ws: WebSocket,
+        stream_id: StreamId,
+        active_streams: Rc<RefCell<HashMap<StreamId, StreamInfo>>>,
+    ) {
+        let mut read_buffer = vec![0u8; 16384];
 
-        if let Some(socket) = socket_opt {
-            // Write to socket
-            let write_result = {
-                let mut socket_borrowed = socket.borrow_mut();
-                socket_borrowed.write_all(payload).await
-            };
+        loop {
+            // Use select! to handle both read and write operations
+            // Since we're in WASM without full tokio, we'll use a simpler approach:
+            // Try to read with a small yield, and check for write requests
 
-            match write_result {
-                Ok(_) => {
-                    console_log!(
-                        "[TunnelSession] Wrote {} bytes to stream {}",
-                        payload.len(),
-                        stream_id
-                    );
+            futures::select! {
+                // Check for data to write to socket
+                write_data = write_rx.next() => {
+                    match write_data {
+                        Some(data) => {
+                            if let Err(e) = socket.write_all(&data).await {
+                                console_error!("[TunnelSession] Write error on stream {}: {:?}", stream_id, e);
+                                break;
+                            }
+                        }
+                        None => {
+                            // Channel closed, client requested close
+                            console_log!("[TunnelSession] Write channel closed for stream {}", stream_id);
+                            break;
+                        }
+                    }
                 }
-                Err(e) => {
-                    console_error!("[TunnelSession] Write error: {:?}", e);
-                    self.active_streams.borrow_mut().remove(&stream_id);
-                    Self::send_error(ws, stream_id, 500, "Write failed");
+                // Read from socket
+                read_result = socket.read(&mut read_buffer).fuse() => {
+                    match read_result {
+                        Ok(0) => {
+                            // EOF from remote
+                            console_log!("[TunnelSession] Stream {} EOF", stream_id);
+                            break;
+                        }
+                        Ok(n) => {
+                            let msg = TunnelMessage::Data {
+                                stream_id,
+                                payload: Bytes::copy_from_slice(&read_buffer[..n]),
+                            };
+                            if ws.send_with_bytes(&msg.encode()).is_err() {
+                                console_error!("[TunnelSession] Failed to send data to client");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            console_error!("[TunnelSession] Read error on stream {}: {:?}", stream_id, e);
+                            break;
+                        }
+                    }
                 }
             }
+        }
+
+        // Cleanup
+        let close_msg = TunnelMessage::Close { stream_id };
+        let _ = ws.send_with_bytes(&close_msg.encode());
+        active_streams.borrow_mut().remove(&stream_id);
+
+        // Close the socket
+        let _ = socket.close().await;
+
+        console_log!(
+            "[TunnelSession] Socket loop exiting for stream {}",
+            stream_id
+        );
+    }
+
+    async fn handle_data(&self, stream_id: StreamId, payload: &[u8]) -> Result<()> {
+        // Get a clone of the write sender (quick borrow, no await)
+        let write_tx_opt = {
+            let streams = self.active_streams.borrow();
+            streams.get(&stream_id).map(|info| info.write_tx.clone())
+        };
+
+        if let Some(mut write_tx) = write_tx_opt {
+            // Send data to the socket task via channel
+            if write_tx
+                .send(Bytes::copy_from_slice(payload))
+                .await
+                .is_err()
+            {
+                // Channel closed, clean up
+                self.active_streams.borrow_mut().remove(&stream_id);
+                console_error!(
+                    "[TunnelSession] Write channel closed for stream {}",
+                    stream_id
+                );
+            }
         } else {
-            Self::send_error(ws, stream_id, 404, "Stream not found");
+            console_warn!("[TunnelSession] Data for unknown stream {}", stream_id);
         }
 
         Ok(())
