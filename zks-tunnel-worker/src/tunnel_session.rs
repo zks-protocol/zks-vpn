@@ -190,15 +190,9 @@ impl TunnelSession {
         &self,
         ws: &WebSocket,
         stream_id: StreamId,
-        _host: &str,
-        _port: u16,
+        host: &str,
+        port: u16,
     ) -> Result<()> {
-        // DEBUG: Send Success immediately
-        let success_msg = TunnelMessage::ConnectSuccess { stream_id };
-        ws.send_with_bytes(&success_msg.encode())?;
-        Ok(())
-
-        /*
         if self.active_streams.borrow().contains_key(&stream_id) {
             Self::send_error(ws, stream_id, 409, "Stream ID already in use");
             return Ok(());
@@ -207,31 +201,28 @@ impl TunnelSession {
         // Cloudflare blocks connect() to ports 80 and 443 on standard plans.
         // For Port 80 (HTTP), we can use fetch() as a fallback proxy.
         if port == 80 {
-            console_log!(
-                "[TunnelSession] Port 80 detected - using Fetch Fallback for {}",
-                host
-            );
+            // console_log!("[TunnelSession] Port 80 detected...");
             return self.handle_http_fetch(ws, stream_id, host).await;
         }
 
         let address = format!("{}:{}", host, port);
-        console_log!("[TunnelSession] Connecting to {}", address);
+        // console_log!("[TunnelSession] Connecting to {}", address);
 
         match Socket::builder().connect(host, port) {
             Ok(socket) => {
                 // Wait for socket to be opened
                 if let Err(e) = socket.opened().await {
-                    console_error!("[TunnelSession] Socket open failed: {:?}", e);
+                    // console_error!("[TunnelSession] Socket open failed: {:?}", e);
                     Self::send_error(ws, stream_id, 502, &format!("Connection failed: {:?}", e));
                     return Ok(());
                 }
 
-                console_log!("[TunnelSession] Connected to {}", address);
+                // console_log!("[TunnelSession] Connected to {}", address);
 
                 // Send ConnectSuccess to client
                 let success_msg = TunnelMessage::ConnectSuccess { stream_id };
                 if let Err(e) = ws.send_with_bytes(&success_msg.encode()) {
-                    console_error!("[TunnelSession] Failed to send ConnectSuccess: {:?}", e);
+                    // console_error!("[TunnelSession] Failed to send ConnectSuccess: {:?}", e);
                     return Ok(());
                 }
 
@@ -252,16 +243,15 @@ impl TunnelSession {
                         .await;
                 });
 
-                console_log!("[TunnelSession] Stream {} ready", stream_id);
+                // console_log!("[TunnelSession] Stream {} ready", stream_id);
             }
             Err(e) => {
-                console_error!("[TunnelSession] Connect failed to {}: {:?}", address, e);
+                // console_error!("[TunnelSession] Connect failed to {}: {:?}", address, e);
                 Self::send_error(ws, stream_id, 502, &format!("Connection failed: {:?}", e));
             }
         }
 
         Ok(())
-        */
     }
 
     /// Handle HTTP requests via fetch() instead of raw TCP connect()
@@ -326,7 +316,7 @@ impl TunnelSession {
 
                 // Construct full URL
                 let url = format!("http://{}{}", host_owned, path);
-                console_log!("[TunnelSession] Fetching URL: {}", url);
+                // console_log!("[TunnelSession] Fetching URL: {}", url);
 
                 // Prepare Fetch
                 let mut init = RequestInit::new();
