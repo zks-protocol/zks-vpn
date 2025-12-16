@@ -1,19 +1,19 @@
 //! TunnelSession - Durable Object for persistent WebSocket connections
 //!
-//! Uses tokio's AsyncRead/AsyncWrite traits with worker::Socket
+//! Uses Socket with Rc<RefCell> for concurrent read/write access
 
 use bytes::Bytes;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wasm_bindgen_futures::spawn_local;
 use worker::*;
 use zks_tunnel_proto::{StreamId, TunnelMessage};
 
-/// Stream state - holds the write half of the socket
+/// Stream state - holds the full socket
 struct StreamInfo {
-    writer: Rc<RefCell<WriteHalf<Socket>>>,
+    socket: Rc<RefCell<Socket>>,
 }
 
 #[durable_object]
@@ -207,24 +207,33 @@ impl TunnelSession {
 
                 console_log!("[TunnelSession] Connected to {}", address);
 
-                // Split the socket into read and write halves
-                let (mut read_half, write_half) = tokio::io::split(socket);
-                let writer = Rc::new(RefCell::new(write_half));
+                // Wrap socket in Rc<RefCell>
+                let socket = Rc::new(RefCell::new(socket));
 
-                // Store the writer
-                self.active_streams
-                    .borrow_mut()
-                    .insert(stream_id, StreamInfo { writer });
+                // Store in active streams
+                self.active_streams.borrow_mut().insert(
+                    stream_id,
+                    StreamInfo {
+                        socket: socket.clone(),
+                    },
+                );
 
                 // Spawn reader task
                 let ws_clone = ws.clone();
                 let active_streams = self.active_streams.clone();
+                let socket_clone = socket.clone();
 
                 spawn_local(async move {
                     let mut buffer = vec![0u8; 16384];
 
                     loop {
-                        match read_half.read(&mut buffer).await {
+                        // Read from socket - must scope the borrow carefully
+                        let read_result = {
+                            let mut socket_guard = socket_clone.borrow_mut();
+                            socket_guard.read(&mut buffer).await
+                        };
+
+                        match read_result {
                             Ok(0) => {
                                 // EOF
                                 console_log!("[TunnelSession] Stream {} EOF", stream_id);
@@ -268,18 +277,19 @@ impl TunnelSession {
     }
 
     async fn handle_data(&self, ws: &WebSocket, stream_id: StreamId, payload: &[u8]) -> Result<()> {
-        let writer_opt = {
+        let socket_opt = {
             let streams = self.active_streams.borrow();
-            streams.get(&stream_id).map(|info| info.writer.clone())
+            streams.get(&stream_id).map(|info| info.socket.clone())
         };
 
-        if let Some(writer) = writer_opt {
-            let result = {
-                let mut w = writer.borrow_mut();
-                w.write_all(payload).await
+        if let Some(socket) = socket_opt {
+            // Write to socket
+            let write_result = {
+                let mut socket_borrowed = socket.borrow_mut();
+                socket_borrowed.write_all(payload).await
             };
 
-            match result {
+            match write_result {
                 Ok(_) => {
                     console_log!(
                         "[TunnelSession] Wrote {} bytes to stream {}",
