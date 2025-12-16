@@ -317,29 +317,8 @@ impl TunnelSession {
                 let method = parts[0]; // GET, POST, etc.
                 let path = parts[1]; // /, /foo, etc.
 
-                // Parse Headers
-                let mut headers = Headers::new();
-                for line in lines.iter().skip(1) {
-                    if line.is_empty() { break; } // End of headers
-                    if let Some((k, v)) = line.split_once(':') {
-                        let key = k.trim();
-                        let val = v.trim();
-                        // Forward all headers except those that might conflict or be invalid for fetch
-                        if !key.eq_ignore_ascii_case("Sec-WebSocket-Key") 
-                           && !key.eq_ignore_ascii_case("Sec-WebSocket-Version") 
-                           && !key.eq_ignore_ascii_case("Upgrade") 
-                           && !key.eq_ignore_ascii_case("Connection") {
-                            let _ = headers.set(key, val);
-                        }
-                    }
-                }
-
                 // Construct full URL
-                // Use the Host header for the URL if available to ensure correct vhost routing
-                let url_host = headers.get("Host").ok().flatten().unwrap_or_else(|| host_owned.clone());
-                // If url_host doesn't have a port and we are on port 80, it's fine.
-                let url = format!("http://{}{}", url_host, path);
-                
+                let url = format!("http://{}{}", host_owned, path);
                 console_log!("[TunnelSession] Fetching URL: {}", url);
 
                 // Prepare Fetch
@@ -352,7 +331,8 @@ impl TunnelSession {
                     "DELETE" => Method::Delete,
                     _ => Method::Get,
                 };
-                init.headers = headers;
+                
+                // TODO: Copy headers from client request
 
                 let url_parsed = match Url::parse(&url) {
                     Ok(u) => u,
