@@ -360,13 +360,12 @@ impl TunnelSession {
                         let mut head = status_line.into_bytes();
 
                         // Reconstruct Headers
-                        // response.headers() returns &Headers, not Result
+                        // response.headers() returns &Headers
                         let headers = response.headers();
-                        for pair in headers.entries() {
-                            if let Ok(p) = pair {
-                                if p.0.to_lowercase() != "transfer-encoding" { // Chunked handled by us
-                                        head.extend_from_slice(format!("{}: {}\r\n", p.0, p.1).as_bytes());
-                                }
+                        // headers.entries() returns an iterator of (String, String)
+                        for (k, v) in headers.entries() {
+                            if k.to_lowercase() != "transfer-encoding" { // Chunked handled by us
+                                head.extend_from_slice(format!("{}: {}\r\n", k, v).as_bytes());
                             }
                         }
                         head.extend_from_slice(b"\r\n"); // End of headers
@@ -379,11 +378,12 @@ impl TunnelSession {
                         let _ = ws_clone.send_with_bytes(&msg.encode());
 
                         // Stream Body
-                        // response.body() returns Option<ResponseBody>, not Result
-                        if let Some(body) = response.body_mut() {
-                                while let Some(chunk_res) = body.next().await {
+                        // Use response.stream() to get a Stream<Item = Result<Vec<u8>, Error>>
+                        if let Ok(mut stream) = response.stream() {
+                            while let Some(chunk_res) = stream.next().await {
                                 match chunk_res {
                                     Ok(chunk) => {
+                                        // chunk is Vec<u8>
                                         let msg = TunnelMessage::Data {
                                             stream_id,
                                             payload: Bytes::from(chunk),
@@ -395,7 +395,7 @@ impl TunnelSession {
                                         break;
                                     }
                                 }
-                                }
+                            }
                         }
                         
                         // Close stream
