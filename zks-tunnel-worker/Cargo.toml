@@ -21,3 +21,16 @@ futures = { workspace = true }
 bytes = { workspace = true }
 getrandom = { version = "0.2", features = ["js"] }
 tokio = { version = "1", default-features = false, features = ["io-util"] }
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Headers",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Window",
+    "WritableStream",
+    "WritableStreamDefaultWriter",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+] }
+wasm-streams = "0.4"
