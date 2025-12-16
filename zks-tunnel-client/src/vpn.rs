@@ -488,8 +488,11 @@ mod implementation {
                     .status()?;
 
                 info!("Windows kill switch enabled (default outbound blocked, app allowed)");
+            }
 
-                // Add default route to VPN interface
+            #[cfg(target_os = "windows")]
+            {
+                // Add default route to VPN interface (Always needed)
                 // route add 0.0.0.0 mask 0.0.0.0 10.0.85.1 metric 1
                 info!("Adding default route...");
                 let _ = Command::new("route")
