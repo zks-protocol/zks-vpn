@@ -493,7 +493,15 @@ mod implementation {
                 // route add 0.0.0.0 mask 0.0.0.0 10.0.85.1 metric 1
                 info!("Adding default route...");
                 let _ = Command::new("route")
-                    .args(["add", "0.0.0.0", "mask", "0.0.0.0", "10.0.85.1", "metric", "1"])
+                    .args([
+                        "add",
+                        "0.0.0.0",
+                        "mask",
+                        "0.0.0.0",
+                        "10.0.85.1",
+                        "metric",
+                        "1",
+                    ])
                     .status();
             }
 
