@@ -21,12 +21,11 @@
 mod implementation {
     use futures::{SinkExt, StreamExt};
     use std::net::Ipv4Addr;
-    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Still needed for tunnel stream
     use tokio::sync::Mutex;
-    use tracing::{debug, error, info, warn}; // Needed for Stack stream/sink
+    use tracing::{debug, error, info}; // Needed for Stack stream/sink
 
     use crate::tunnel::TunnelClient;
     use zks_tunnel_proto::TunnelMessage;

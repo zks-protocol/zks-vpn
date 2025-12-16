@@ -41,3 +41,5 @@ tokio-util = { version = "0.7.17", features = ["compat"] }
 [target.'cfg(windows)'.dependencies]
 # Windows-specific: Wintun driver bindings
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

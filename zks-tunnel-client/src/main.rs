@@ -238,7 +238,6 @@ fn check_privileges() -> Result<(), BoxError> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::MetadataExt;
         if unsafe { libc::geteuid() } != 0 {
             error!("❌ VPN mode requires root privileges!");
             error!("   Run with: sudo zks-vpn --mode vpn ...");
