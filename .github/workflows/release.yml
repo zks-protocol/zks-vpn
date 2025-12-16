@@ -53,7 +53,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../${{ matrix.archive }}
+          Compress-Archive -Path ${{ matrix.artifact }} -DestinationPath ../../../${{ matrix.archive }} -Force
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
