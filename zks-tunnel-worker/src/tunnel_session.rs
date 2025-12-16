@@ -190,16 +190,13 @@ impl TunnelSession {
         &self,
         ws: &WebSocket,
         stream_id: StreamId,
-        host: &str,
-        port: u16,
+        _host: &str,
+        _port: u16,
     ) -> Result<()> {
-        console_log!("[TunnelSession] DEBUG: Connect request for {}:{}", host, port);
-        
         // DEBUG: Send Success immediately
         let success_msg = TunnelMessage::ConnectSuccess { stream_id };
         ws.send_with_bytes(&success_msg.encode())?;
-        
-        return Ok(());
+        Ok(())
 
         /*
         if self.active_streams.borrow().contains_key(&stream_id) {
