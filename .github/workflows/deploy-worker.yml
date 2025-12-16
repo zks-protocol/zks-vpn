@@ -1,0 +1,41 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'zks-tunnel-worker/**'
+      - 'zks-tunnel-proto/**'
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare Workers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Install wrangler
+        run: npm install -g wrangler
+      
+      - name: Build and Deploy Worker
+        working-directory: zks-tunnel-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "Deploying to Cloudflare Workers..."
+            wrangler deploy
+          else
+            echo "CLOUDFLARE_API_TOKEN not set, building only..."
+            wrangler build || cargo build --target wasm32-unknown-unknown --release
+          fi
