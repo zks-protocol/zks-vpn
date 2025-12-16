@@ -13,10 +13,10 @@ ZKS-Tunnel is a revolutionary **system-wide VPN** that runs entirely on **Cloudf
 ┌─────────────────────────────────────────────────────────────────┐
 │  YOUR PC          CLOUDFLARE EDGE           INTERNET            │
 │                   (300+ cities)                                 │
-│  ┌─────────┐     ┌─────────────┐     ┌─────────────────────┐   │
-│  │ zks-vpn │────►│ ZKS Worker  │────►│ Any Website/Server  │   │
-│  │ TUN VPN │     │ (Free!)     │     │ Sees Cloudflare IP  │   │
-│  └─────────┘     └─────────────┘     └─────────────────────┘   │
+│  ┌─────────┐     ┌─────────────┐     ┌─────────────────────┐    │
+│  │ zks-vpn │────►│ ZKS Worker  │────►│ Any Website/Server  │    │
+│  │ TUN VPN │     │ (Free!)     │     │ Sees Cloudflare IP  │    │
+│  └─────────┘     └─────────────┘     └─────────────────────┘    │
 │                                                                 │
 │  ALL system traffic routed. Your data is ENCRYPTED (OTP-level). │
 └─────────────────────────────────────────────────────────────────┘
