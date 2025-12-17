@@ -52,6 +52,15 @@ impl ZksKeys {
         }
     }
 
+    /// Create ZKS keys from a shared key (from X25519 key exchange)
+    pub fn new_from_shared_key(shared_key: Vec<u8>) -> Self {
+        Self {
+            local_key: shared_key,
+            remote_key: Vec::new(),
+            position: 0,
+        }
+    }
+
     /// Fetch remote key from zks-vernam worker
     pub async fn fetch_remote_key(
         &mut self,
@@ -125,13 +134,16 @@ pub struct P2PRelay {
 
 #[allow(dead_code)]
 impl P2PRelay {
-    /// Connect to relay and establish P2P session
+    /// Connect to relay and establish P2P session with key exchange
     pub async fn connect(
         relay_url: &str,
         vernam_url: &str,
         room_id: &str,
         role: PeerRole,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::key_exchange::{KeyExchange, KeyExchangeMessage};
+        use tokio::time::{timeout, Duration};
+
         // Build WebSocket URL
         let ws_url = format!(
             "{}/room/{}?role={}",
@@ -147,21 +159,77 @@ impl P2PRelay {
         info!("Connected to relay (status: {})", response.status());
 
         // Split into read/write
-        let (writer, reader) = ws_stream.split();
+        let (mut writer, mut reader) = ws_stream.split();
 
-        // Initialize ZKS keys (1MB of key material)
-        let key_size = 1024 * 1024;
-        let mut keys = ZksKeys::new_local(key_size);
+        // === X25519 Key Exchange ===
+        info!("🔑 Initiating X25519 key exchange...");
 
-        // Fetch remote key from zks-vernam
+        let mut key_exchange = KeyExchange::new(room_id);
+        key_exchange.generate_keypair();
+
+        let our_pk = key_exchange
+            .get_public_key_bytes()
+            .ok_or("Failed to generate keypair")?;
+
+        // Send our public key
+        let pk_msg = KeyExchangeMessage::new_public_key(&our_pk);
+        writer.send(Message::Text(pk_msg.to_json())).await?;
+        debug!("Sent our public key");
+
+        // Wait for peer's public key (with timeout)
+        let peer_pk = timeout(Duration::from_secs(30), async {
+            while let Some(msg) = reader.next().await {
+                match msg? {
+                    Message::Text(text) => {
+                        // Check if it's a key exchange message
+                        if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                            if let Some(pk_bytes) = ke_msg.parse_public_key() {
+                                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(pk_bytes);
+                            }
+                        }
+                        // Other control messages (welcome, etc.) - ignore
+                        debug!("Relay control message: {}", text);
+                    }
+                    Message::Binary(_) => {
+                        // Ignore binary before key exchange
+                    }
+                    Message::Close(_) => {
+                        return Err("Connection closed before key exchange".into());
+                    }
+                    _ => {}
+                }
+            }
+            Err("No key exchange message received".into())
+        })
+        .await
+        .map_err(|_| "Key exchange timeout")??;
+
+        // Complete key exchange
+        key_exchange.receive_peer_public_key(&peer_pk)?;
+        info!("🔐 Key exchange complete! Encryption key derived.");
+
+        // Get the derived encryption key
+        let encryption_key = key_exchange
+            .get_encryption_key()
+            .ok_or("Failed to derive encryption key")?
+            .to_vec();
+
+        // Initialize ZKS keys with derived shared key
+        let mut keys = ZksKeys::new_from_shared_key(encryption_key.clone());
+
+        // Optionally XOR with vernam key for additional security (defense in depth)
         if !vernam_url.is_empty() {
             if let Err(e) = keys.fetch_remote_key(vernam_url).await {
                 warn!(
-                    "Failed to fetch remote key, using local-only encryption: {}",
+                    "Failed to fetch vernam key (using shared key only): {}",
                     e
                 );
             }
         }
+
+        // Send ack
+        let ack = KeyExchangeMessage::Ack { success: true };
+        writer.send(Message::Text(ack.to_json())).await?;
 
         Ok(Self {
             writer: Arc::new(Mutex::new(writer)),

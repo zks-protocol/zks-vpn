@@ -22,6 +22,7 @@ use tracing_subscriber::FmtSubscriber;
 mod chain;
 mod exit_peer;
 mod http_proxy;
+mod key_exchange;
 mod p2p_client;
 mod p2p_relay;
 mod p2p_vpn;
