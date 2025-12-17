@@ -236,7 +236,7 @@ impl P2PRelay {
                             writer.send(Message::Text(pk_msg.to_json())).await?;
                             continue;
                         }
-                        
+
                         // Check if it's a key exchange message
                         if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
                             if let Some(pk_bytes) = ke_msg.parse_public_key() {
