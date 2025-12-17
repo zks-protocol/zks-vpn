@@ -9,7 +9,7 @@
 //! The relay CANNOT decrypt traffic because it never sees the private keys.
 
 use hkdf::Hkdf;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 
 /// Key exchange state machine
@@ -111,8 +111,7 @@ impl KeyExchange {
 
             // 1. Derive 32-byte seed using HKDF (max output is 255*32 bytes, so we can't derive 1MB directly)
             let mut seed = [0u8; 32];
-            hk.expand(info, &mut seed)
-                .expect("HKDF expansion failed");
+            hk.expand(info, &mut seed).expect("HKDF expansion failed");
 
             // 2. Expand to 1MB using SHA256 counter mode
             // This creates a cryptographically secure stream from the seed
@@ -128,7 +127,7 @@ impl KeyExchange {
                 key_material.extend_from_slice(&result);
                 counter += 1;
             }
-            
+
             // Truncate to exact size
             key_material.truncate(target_size);
 
