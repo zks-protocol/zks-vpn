@@ -50,3 +50,12 @@ User -> [Relay] -> VPS 1 -> [Relay] -> VPS 2 -> Internet
 **Goal**: Finish the `vpn` mode integration with `tun-rs`.
 - Currently, `p2p-client` provides SOCKS5.
 - Next step: Connect SOCKS5 to a virtual network card so *all* apps work without configuration.
+
+## 7. Swarm Entropy Tax (Trustless Key Generation)
+**Goal**: Eliminate trust in Cloudflare's RNG by using the Swarm.
+- **Mechanism**: Every connected peer *must* provide random bytes (Entropy) to the network.
+- **Process**:
+    1.  When you connect, the Relay picks 10 random peers.
+    2.  It asks them for 32 bytes of randomness.
+    3.  It XORs them together to create your $K_{Remote}$.
+- **Result**: To break the key, an attacker must control **ALL 10** randomly selected peers. Statistically impossible.
