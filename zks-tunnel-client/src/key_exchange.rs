@@ -109,10 +109,29 @@ impl KeyExchange {
 
             let hk = Hkdf::<Sha256>::new(Some(salt), shared_secret.as_bytes());
 
-            // Derive 1MB of key material (matching current ZksKeys size)
-            let mut key_material = vec![0u8; 1024 * 1024];
-            hk.expand(info, &mut key_material)
+            // 1. Derive 32-byte seed using HKDF (max output is 255*32 bytes, so we can't derive 1MB directly)
+            let mut seed = [0u8; 32];
+            hk.expand(info, &mut seed)
                 .expect("HKDF expansion failed");
+
+            // 2. Expand to 1MB using SHA256 counter mode
+            // This creates a cryptographically secure stream from the seed
+            let target_size = 1024 * 1024;
+            let mut key_material = Vec::with_capacity(target_size);
+            let mut counter = 0u64;
+            let mut hasher = Sha256::new();
+
+            while key_material.len() < target_size {
+                use sha2::Digest; // Import trait here to avoid conflict
+                hasher.update(&seed);
+                hasher.update(&counter.to_le_bytes());
+                let result = hasher.finalize_reset();
+                key_material.extend_from_slice(&result);
+                counter += 1;
+            }
+            
+            // Truncate to exact size
+            key_material.truncate(target_size);
 
             self.encryption_key = Some(key_material);
         }
