@@ -12,7 +12,6 @@
  */
 use serde::{Deserialize, Serialize};
 use worker::*;
-use zks_tunnel_proto::TunnelMessage;
 
 /// Peer role in the VPN room
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]

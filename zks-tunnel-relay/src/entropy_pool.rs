@@ -263,7 +263,7 @@ impl EntropyPool {
         // Use list_with_options to filter by prefix
         let options = ListOptions::new().prefix("entropy:");
         let entries: std::collections::HashMap<String, EntropyContribution> =
-            storage.list_with_options(options).await?.entries().await?;
+            storage.list_with_options(options).await?.entries()?;
 
         let contributions: Vec<EntropyContribution> = entries.into_values().collect();
 
