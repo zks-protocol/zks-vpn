@@ -1,5 +1,5 @@
 /**
- * ZKS-Tunnel Relay - P2P VPN Relay Worker
+ * ZKS-Tunnel Relay - P2P VPN Relay Worker v0.2.0
  *
  * Relays encrypted VPN traffic between Client and Exit Peer.
  * Uses ZKS double-key Vernam encryption for information-theoretic security.
