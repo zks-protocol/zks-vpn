@@ -1,4 +1,4 @@
-# ZKS-Revised Protocol Specification (v2.0)
+# Zero Knowledge Swarm (ZKS) Protocol Specification (v2.0)
 
 **Status**: Draft
 **Author**: ZKS Team
