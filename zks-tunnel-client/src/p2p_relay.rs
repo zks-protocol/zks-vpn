@@ -229,6 +229,14 @@ impl P2PRelay {
             while let Some(msg) = reader.next().await {
                 match msg? {
                     Message::Text(text) => {
+                        // Check if it's a PeerJoin event - re-send our public key
+                        if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
+                            debug!("Peer joined, re-sending public key");
+                            let pk_msg = KeyExchangeMessage::new_public_key(&our_pk);
+                            writer.send(Message::Text(pk_msg.to_json())).await?;
+                            continue;
+                        }
+                        
                         // Check if it's a key exchange message
                         if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
                             if let Some(pk_bytes) = ke_msg.parse_public_key() {
