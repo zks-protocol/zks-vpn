@@ -12,7 +12,8 @@ User -> [Relay] -> Peer A -> [Relay] -> Peer B -> Internet
 
 ### Implementation Plan
 - Add `--upstream-proxy` support to `exit-peer` mode.
-- Allow `exit-peer` to route its outbound traffic through another `p2p-client` instance.
+- **ZKS-over-ZKS**: Implement a mode where `exit-peer` connects to another `zks-tunnel-relay` instead of direct TCP.
+- This creates the "Triple-Blind" architecture.
 
 ## 2. UDP Hole Punching (Direct P2P)
 **Goal**: Bypass the Cloudflare Relay for maximum speed.

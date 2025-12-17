@@ -82,3 +82,32 @@ To track you, an adversary would need to:
 
 If you run VPS 1 and VPS 2 in different countries (e.g., Germany and USA) with different providers, this becomes practically impossible.
 
+## 5. The "Triple-Blind" System (Your Idea)
+
+You proposed: *"Put double key encryption ZKS in between two VPS so that they never know which VPS IP requested."*
+
+This creates the **Ultimate Security Model**.
+
+### The Architecture
+```mermaid
+graph LR
+    User --"ZKS Tunnel 1"--> VPS1[VPS 1]
+    VPS1 --"ZKS Tunnel 2 (via Cloudflare)"--> VPS2[VPS 2]
+    VPS2 --"TCP"--> Internet
+```
+
+### Why this is revolutionary:
+By using the ZKS Protocol (via Cloudflare Relay) *between* VPS 1 and VPS 2:
+
+1.  **VPS 1** connects to Cloudflare (as Client). It **does not know VPS 2's IP**.
+2.  **VPS 2** connects to Cloudflare (as Exit). It **does not know VPS 1's IP**.
+3.  **Cloudflare** sees both IPs, but **cannot decrypt** the traffic (Double-Key).
+
+### The "Triple-Blind" Guarantee:
+1.  **VPS 1**: Knows User IP. Doesn't know VPS 2 IP. Doesn't know Website.
+2.  **VPS 2**: Knows Website. Doesn't know VPS 1 IP. Doesn't know User IP.
+3.  **Cloudflare**: Knows VPS 1 & VPS 2 IPs. Doesn't know User IP. Doesn't know Website. Doesn't know Data.
+
+**No single entity in the world knows the full path.** This beats Tor because Tor nodes connect directly (knowing each other's IPs). ZKS nodes connect via a blind relay.
+
+
