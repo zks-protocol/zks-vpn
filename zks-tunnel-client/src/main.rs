@@ -154,8 +154,14 @@ async fn main() -> Result<(), BoxError> {
                 error!("Room ID required for P2P mode. Use --room <id>");
                 std::process::exit(1);
             });
-            return p2p_client::run_p2p_client(&args.relay, &args.vernam, &room_id, args.port, args.proxy)
-                .await;
+            return p2p_client::run_p2p_client(
+                &args.relay,
+                &args.vernam,
+                &room_id,
+                args.port,
+                args.proxy,
+            )
+            .await;
         }
         Mode::P2pVpn => {
             let room_id = args.room.clone().unwrap_or_else(|| {

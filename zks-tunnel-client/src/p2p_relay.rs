@@ -5,16 +5,16 @@
 
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_socks::tcp::Socks5Stream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{client_async, WebSocketStream};
-use tokio_socks::tcp::Socks5Stream;
-use url::Url;
-use std::net::SocketAddr;
 use tracing::{debug, info, warn};
+use url::Url;
 use zks_tunnel_proto::TunnelMessage;
 
 /// Peer role in the VPN relay
@@ -167,9 +167,9 @@ impl P2PRelay {
         let stream: BoxedStream = if let Some(proxy_addr) = proxy {
             info!("Connecting via SOCKS5 proxy: {}", proxy_addr);
             let proxy_socket_addr: SocketAddr = proxy_addr.parse()?;
-            
+
             let socks_stream = Socks5Stream::connect(proxy_socket_addr, (host, port)).await?;
-            
+
             if scheme == "wss" {
                 let connector = native_tls::TlsConnector::new()?;
                 let connector = tokio_native_tls::TlsConnector::from(connector);
@@ -180,7 +180,7 @@ impl P2PRelay {
             }
         } else {
             let tcp_stream = TcpStream::connect((host, port)).await?;
-            
+
             if scheme == "wss" {
                 let connector = native_tls::TlsConnector::new()?;
                 let connector = tokio_native_tls::TlsConnector::from(connector);
