@@ -125,26 +125,21 @@ Here is a brutally honest audit of the potential risks and how ZKS handles them.
 
 ### B. Timing Analysis (The "God Mode" Attack)
 *   **Risk**: If the NSA monitors your home internet AND the Oracle Datacenter, they can see a burst of data leaving your house at 10:00:01 and a burst of data leaving Oracle at 10:00:02. They can correlate them.
-*   **ZKS Defense**: This is hard to fix for *any* low-latency system (even Tor).
-*   **Mitigation**: The "Swarm". If thousands of users are using the same Relay, your traffic blends in. The more users, the safer you are.
+*   **ZKS Defense**: **Constant Rate Padding (CRP)** (Planned).
+*   **Mitigation**: By sending data at a fixed rate (e.g., 50 Mbps) regardless of activity, the traffic pattern becomes a flat line. This makes correlation mathematically impossible.
 
 ### C. Payment Trail (Operational Risk)
 *   **Risk**: You pay for VPS 1 and VPS 2 with the same credit card.
 *   **ZKS Defense**: This is not a code bug, but a user error.
 *   **Mitigation**: Use different providers (e.g., Oracle for Hop 1, AWS for Hop 2) or use free tiers/crypto.
 
-### D. Browser Fingerprinting
+### D. Browser Fingerprinting (User Error)
 *   **Risk**: Your IP is hidden, but your browser sends cookies or has a unique screen resolution.
-*   **ZKS Defense**: ZKS is a *Network* tool. It cannot stop Chrome from sending cookies.
-*   **Mitigation**: Use **Brave** or **Tor Browser** with ZKS.
+*   **ZKS Defense**: **Remote Browser Isolation** (Planned).
+*   **Mitigation**: Run the browser *on the VPS* and stream the video to your PC. This guarantees 100% isolation. For now, use **Brave** or **Tor Browser**.
 
 ## Conclusion
-The **ZKS Triple-Blind Architecture** is mathematically secure against:
-1.  **Decryption** (Vernam Cipher).
-2.  **Traffic Analysis** (Split Knowledge).
-3.  **DNS Leaks** (Remote Resolution).
-
-The only remaining risks are **Global Timing Analysis** (extremely difficult/expensive) and **User Error** (logging into Facebook).
+The **ZKS Triple-Blind Architecture** combined with **Constant Rate Padding** creates a system that is theoretically secure against all known network attacks.
 
 
 

@@ -26,16 +26,17 @@ User -> [Relay] -> VPS 1 -> [Relay] -> VPS 2 -> Internet
 - Establish a direct UDP connection between Client and Exit Peer.
 - **Benefit**: Zero relay latency, unlimited bandwidth (limited only by peers).
 
-## 3. Public Swarm Discovery
-**Goal**: Allow users to share bandwidth anonymously.
-- **DHT (Distributed Hash Table)**: Store active Room IDs.
-- **Incentives**: Earn credits for running an Exit Peer (ZKS Token?).
-- **Reputation System**: Verify honest peers.
+## 3. Constant Rate Padding (Anti-Timing Analysis)
+**Goal**: Defeat Global Timing Analysis by making traffic look like a flat line.
+- **Mechanism**: Send data at a fixed rate (e.g., 50 Mbps). If no data, send dummy packets.
+- **Rust Implementation**: Use `tokio::time::interval` to enforce strict packet timing.
+- **Trade-off**: Wastes bandwidth (but we have unlimited Oracle bandwidth).
 
-## 4. Obfuscation (Stealth Mode)
-**Goal**: Hide ZKS traffic from Deep Packet Inspection (DPI).
-- Wrap WebSocket traffic in "fake" HTML or video stream headers.
-- Make VPN traffic look like watching YouTube.
+## 4. ZKS Remote Browser (Anti-User Error)
+**Goal**: Prevent users from de-anonymizing themselves (cookies, fingerprinting).
+- **Architecture**: Run a headless Chromium instance on the Exit Peer.
+- **Protocol**: Stream video/pixels to the Client (like Stadia/GeForce Now).
+- **Result**: The "Browser" is 100% isolated from the User's PC. No cookies or malware can cross the gap.
 
 ## 5. System-Wide Routing (TUN Interface)
 **Goal**: Finish the `vpn` mode integration with `tun-rs`.
