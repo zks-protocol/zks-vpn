@@ -218,10 +218,24 @@ where
             writer
                 .write_all(format!("HTTP/1.1 {} {}\r\n", status, status_text).as_bytes())
                 .await?;
-            writer.write_all(resp_headers.as_bytes()).await?;
+
+            // Filter out headers that we'll set ourselves
+            for line in resp_headers.lines() {
+                let lower = line.to_lowercase();
+                if !lower.starts_with("transfer-encoding:")
+                    && !lower.starts_with("content-length:")
+                    && !lower.starts_with("connection:")
+                {
+                    writer.write_all(line.as_bytes()).await?;
+                    writer.write_all(b"\r\n").await?;
+                }
+            }
+
+            // Set our own content-length
             writer
                 .write_all(format!("Content-Length: {}\r\n", body.len()).as_bytes())
                 .await?;
+            writer.write_all(b"Connection: close\r\n").await?;
             writer.write_all(b"\r\n").await?;
             writer.write_all(&body).await?;
             writer.flush().await?;
