@@ -1,16 +1,15 @@
 /**
  * VpnRoom - ZKS-VPN Durable Object for P2P VPN Relay
- * 
+ *
  * High-performance binary packet relay between Client and Exit Peer.
  * Uses WebSocket Hibernation for cost-efficient idle connections.
- * 
+ *
  * Key features:
  * - Only 2 peers per room (Client + Exit Peer)
  * - Zero-knowledge: Cannot decrypt ZKS-encrypted traffic
  * - Binary message relay for maximum throughput
  * - Automatic peer notification on join/leave
  */
-
 use serde::{Deserialize, Serialize};
 use worker::*;
 use zks_tunnel_proto::TunnelMessage;
@@ -35,8 +34,8 @@ struct PeerSession {
 #[serde(tag = "type")]
 enum ServerEvent {
     #[serde(rename = "welcome")]
-    Welcome { 
-        your_id: String, 
+    Welcome {
+        your_id: String,
         role: String,
         peer_connected: bool,
     },
@@ -64,7 +63,7 @@ impl DurableObject for VpnRoom {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let upgrade = req.headers().get("Upgrade")?;
-        
+
         if upgrade.as_deref() != Some("websocket") {
             return Response::error("Expected WebSocket upgrade", 426);
         }
@@ -72,7 +71,7 @@ impl DurableObject for VpnRoom {
         // Parse query parameters
         let url = req.url()?;
         let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
-        
+
         // Get role (required)
         let role_str = params.get("role").map(|s| s.as_ref()).unwrap_or("client");
         let role = match role_str {
@@ -81,17 +80,19 @@ impl DurableObject for VpnRoom {
         };
 
         // Check if role is already taken
-        let existing_roles: Vec<PeerRole> = self.get_all_sessions()
+        let existing_roles: Vec<PeerRole> = self
+            .get_all_sessions()
             .into_iter()
             .map(|s| s.role)
             .collect();
-        
+
         if existing_roles.contains(&role) {
             return Response::error(format!("{:?} already connected to this room", role), 409);
         }
 
         // Generate peer ID
-        let peer_id = params.get("peerId")
+        let peer_id = params
+            .get("peerId")
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("{:?}-{}", role, rand_id()));
 
@@ -114,10 +115,11 @@ impl DurableObject for VpnRoom {
         server.serialize_attachment(&session)?;
 
         // Notify the other peer if connected
-        let join_msg = serde_json::to_string(&ServerEvent::PeerJoin { 
+        let join_msg = serde_json::to_string(&ServerEvent::PeerJoin {
             peer_id: peer_id.clone(),
             role: format!("{:?}", role),
-        }).unwrap_or_default();
+        })
+        .unwrap_or_default();
         self.broadcast_text(&join_msg, Some(&peer_id));
 
         // Check if the other peer is connected
@@ -128,7 +130,8 @@ impl DurableObject for VpnRoom {
             your_id: peer_id.clone(),
             role: format!("{:?}", role),
             peer_connected,
-        }).unwrap_or_default();
+        })
+        .unwrap_or_default();
         let _ = server.send_with_str(&welcome);
 
         console_log!("[VpnRoom] {:?} joined: {}", role, peer_id);
@@ -175,29 +178,27 @@ impl DurableObject for VpnRoom {
     ) -> Result<()> {
         if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
             console_log!("[VpnRoom] {:?} left: {}", session.role, session.peer_id);
-            
-            let leave_msg = serde_json::to_string(&ServerEvent::PeerLeave { 
+
+            let leave_msg = serde_json::to_string(&ServerEvent::PeerLeave {
                 peer_id: session.peer_id,
                 role: format!("{:?}", session.role),
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
             self.broadcast_text(&leave_msg, None);
         }
 
         Ok(())
     }
 
-    async fn websocket_error(
-        &self,
-        ws: WebSocket,
-        error: Error,
-    ) -> Result<()> {
+    async fn websocket_error(&self, ws: WebSocket, error: Error) -> Result<()> {
         console_error!("[VpnRoom] WebSocket error: {:?}", error);
-        
+
         if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
-            let leave_msg = serde_json::to_string(&ServerEvent::PeerLeave { 
+            let leave_msg = serde_json::to_string(&ServerEvent::PeerLeave {
                 peer_id: session.peer_id,
                 role: format!("{:?}", session.role),
-            }).unwrap_or_default();
+            })
+            .unwrap_or_default();
             self.broadcast_text(&leave_msg, None);
         }
 
@@ -207,11 +208,10 @@ impl DurableObject for VpnRoom {
 
 impl VpnRoom {
     fn get_all_sessions(&self) -> Vec<PeerSession> {
-        self.state.get_websockets()
+        self.state
+            .get_websockets()
             .into_iter()
-            .filter_map(|ws| {
-                ws.deserialize_attachment::<PeerSession>().ok().flatten()
-            })
+            .filter_map(|ws| ws.deserialize_attachment::<PeerSession>().ok().flatten())
             .collect()
     }
 
