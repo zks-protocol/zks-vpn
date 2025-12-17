@@ -114,6 +114,11 @@ struct Args {
     #[arg(long, default_value = "https://zks-vernam.md-wasif-faisal.workers.dev")]
     vernam: String,
 
+    /// Constant Rate Padding in Kbps (traffic analysis defense)
+    /// Set to 0 to disable. Example: --padding 100 for 100 Kbps padding
+    #[arg(long, default_value_t = 0)]
+    padding: u32,
+
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,

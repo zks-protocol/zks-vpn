@@ -281,4 +281,65 @@ impl P2PRelay {
         writer.close().await?;
         Ok(())
     }
+
+    /// Start Constant Rate Padding (CRP) for traffic analysis defense
+    ///
+    /// Sends encrypted padding packets at a constant rate to hide actual traffic patterns.
+    /// This prevents timing-based correlation attacks.
+    ///
+    /// # Arguments
+    /// * `rate_kbps` - Padding rate in kilobits per second (e.g., 100 = 100 Kbps)
+    /// * `running` - Atomic bool to stop padding when VPN disconnects
+    pub fn start_padding(
+        &self,
+        rate_kbps: u32,
+        running: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let writer = self.writer.clone();
+        let keys = self.keys.clone();
+
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+
+            // Calculate packet size and interval
+            // 1400 bytes/packet (MTU-safe), rate in Kbps
+            let packet_size = 1400usize;
+            let bytes_per_second = (rate_kbps as f64 * 1024.0 / 8.0) as u64;
+            let packets_per_second = bytes_per_second / packet_size as u64;
+            let interval_ms = if packets_per_second > 0 {
+                1000 / packets_per_second
+            } else {
+                1000
+            };
+
+            info!(
+                "CRP: Starting padding at {} Kbps ({} pkt/s, {}ms interval)",
+                rate_kbps, packets_per_second, interval_ms
+            );
+
+            // Create padding packet (random data that looks like encrypted traffic)
+            let mut padding = vec![0u8; packet_size];
+
+            while running.load(Ordering::SeqCst) {
+                // Fill with fresh random data for each packet
+                getrandom::getrandom(&mut padding).unwrap_or_default();
+
+                // Encrypt padding
+                let encrypted = {
+                    let mut keys_guard = keys.lock().await;
+                    keys_guard.encrypt(&padding)
+                };
+
+                // Send padding (ignore errors - connection might be busy)
+                let mut writer_guard = writer.lock().await;
+                let _ = writer_guard.send(Message::Binary(encrypted)).await;
+                drop(writer_guard);
+
+                // Wait for next interval
+                tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
+            }
+
+            info!("CRP: Padding stopped");
+        })
+    }
 }
