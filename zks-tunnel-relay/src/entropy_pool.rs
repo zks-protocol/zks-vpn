@@ -267,12 +267,17 @@ impl EntropyPool {
         // The map is already a HashMap-like structure
         let mut contributions = Vec::new();
 
-        // Get keys and iterate
+        // Get keys and iterate - keys() returns iterator of Result<JsValue, _>
         let keys = map.keys();
-        for key in keys {
-            if let Ok(key_str) = key {
-                if let Ok(Some(contribution)) = storage.get::<EntropyContribution>(&key_str).await {
-                    contributions.push(contribution);
+        for key_result in keys {
+            if let Ok(key_js) = key_result {
+                // Convert JsValue to String
+                if let Some(key_str) = key_js.as_string() {
+                    if let Ok(Some(contribution)) =
+                        storage.get::<EntropyContribution>(&key_str).await
+                    {
+                        contributions.push(contribution);
+                    }
                 }
             }
         }
