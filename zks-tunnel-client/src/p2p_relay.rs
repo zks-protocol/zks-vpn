@@ -224,7 +224,8 @@ impl P2PRelay {
         debug!("Sent our public key");
 
         // Wait for peer's public key (with timeout)
-        let peer_pk = timeout(Duration::from_secs(30), async {
+        // 5 minute timeout to allow Exit Peer to wait for Client
+        let peer_pk = timeout(Duration::from_secs(300), async {
             while let Some(msg) = reader.next().await {
                 match msg? {
                     Message::Text(text) => {
