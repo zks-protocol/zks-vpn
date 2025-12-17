@@ -27,7 +27,7 @@ struct StreamState {
 }
 
 type PendingMap = Arc<Mutex<HashMap<StreamId, oneshot::Sender<Result<(), String>>>>>;
-type HttpResponseMap = Arc<Mutex<HashMap<StreamId, mpsc::Sender<TunnelMessage>>>>;
+type HttpResponseMap = Arc<std::sync::Mutex<HashMap<StreamId, mpsc::Sender<TunnelMessage>>>>;
 
 /// Production-grade tunnel client with connection multiplexing
 #[derive(Clone)]
@@ -67,7 +67,8 @@ impl TunnelClient {
         let pending_connections_clone = pending_connections.clone();
 
         // Pending HTTP requests map - shared between reader task and main client
-        let pending_http_requests: HttpResponseMap = Arc::new(Mutex::new(HashMap::new()));
+        let pending_http_requests: HttpResponseMap =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
         let pending_http_clone = pending_http_requests.clone();
 
         // Spawn writer task - sends messages from channel to WebSocket
@@ -146,8 +147,11 @@ impl TunnelClient {
                                     headers,
                                     body,
                                 } => {
-                                    let mut pending = pending_http_clone.lock().await;
-                                    if let Some(tx) = pending.remove(&stream_id) {
+                                    let tx_opt = {
+                                        let mut pending = pending_http_clone.lock().unwrap();
+                                        pending.remove(&stream_id)
+                                    };
+                                    if let Some(tx) = tx_opt {
                                         // Reconstruct the message to send
                                         let resp = TunnelMessage::HttpResponse {
                                             stream_id,
@@ -364,13 +368,9 @@ impl TunnelClient {
     ) -> Result<mpsc::Receiver<TunnelMessage>, Box<dyn std::error::Error + Send + Sync>> {
         let (tx, rx) = mpsc::channel(1);
 
-        // Use try_lock to avoid async in sync context
-        // This might fail if lock is held, but for initialization it should be fine
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut pending = self.pending_http_requests.lock().await;
-            pending.insert(stream_id, tx);
-        });
+        // Use sync mutex - safe to call from any context
+        let mut pending = self.pending_http_requests.lock().unwrap();
+        pending.insert(stream_id, tx);
 
         Ok(rx)
     }
