@@ -58,7 +58,7 @@ pub async fn run_exit_peer(
     info!("╚══════════════════════════════════════════════════════════════╝");
 
     // Connect to relay as Exit Peer
-    let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer).await?;
+    let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await?;
     let relay = Arc::new(relay);
 
     info!("✅ Connected to relay as Exit Peer");

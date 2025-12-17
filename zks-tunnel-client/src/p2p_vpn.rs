@@ -61,6 +61,8 @@ mod implementation {
         pub vernam_url: String,
         /// Room ID for the VPN session
         pub room_id: String,
+        /// Upstream SOCKS5 proxy
+        pub proxy: Option<String>,
     }
 
     impl Default for P2PVpnConfig {
@@ -75,6 +77,7 @@ mod implementation {
                 relay_url: String::new(),
                 vernam_url: String::new(),
                 room_id: String::new(),
+                proxy: None,
             }
         }
     }
@@ -164,6 +167,7 @@ mod implementation {
                 &self.config.vernam_url,
                 &self.config.room_id,
                 PeerRole::Client,
+                self.config.proxy.clone(),
             )
             .await?;
 

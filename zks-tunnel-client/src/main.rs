@@ -123,6 +123,10 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Upstream SOCKS5 proxy (e.g., 127.0.0.1:9050) to route traffic through
+    #[arg(long)]
+    proxy: Option<String>,
 }
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -150,7 +154,7 @@ async fn main() -> Result<(), BoxError> {
                 error!("Room ID required for P2P mode. Use --room <id>");
                 std::process::exit(1);
             });
-            return p2p_client::run_p2p_client(&args.relay, &args.vernam, &room_id, args.port)
+            return p2p_client::run_p2p_client(&args.relay, &args.vernam, &room_id, args.port, args.proxy)
                 .await;
         }
         Mode::P2pVpn => {
@@ -372,6 +376,7 @@ async fn run_p2p_vpn_mode(_args: Args, _room_id: String) -> Result<(), BoxError>
             relay_url: args.relay.clone(),
             vernam_url: args.vernam.clone(),
             room_id,
+            proxy: args.proxy.clone(),
         };
 
         info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");

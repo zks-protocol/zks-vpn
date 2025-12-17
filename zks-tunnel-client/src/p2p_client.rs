@@ -51,6 +51,7 @@ pub async fn run_p2p_client(
     vernam_url: &str,
     room_id: &str,
     listen_port: u16,
+    proxy: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║         ZKS-VPN P2P Client - Zero Knowledge Swarm            ║");
@@ -60,7 +61,7 @@ pub async fn run_p2p_client(
     info!("╚══════════════════════════════════════════════════════════════╝");
 
     // Connect to relay as Client
-    let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::Client).await?;
+    let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::Client, proxy).await?;
     let relay = Arc::new(relay);
 
     info!("✅ Connected to relay as Client");

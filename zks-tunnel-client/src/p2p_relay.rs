@@ -8,8 +8,12 @@ use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{client_async, WebSocketStream};
+use tokio_socks::tcp::Socks5Stream;
+use url::Url;
+use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 use zks_tunnel_proto::TunnelMessage;
 
@@ -118,13 +122,16 @@ impl ZksKeys {
     }
 }
 
+/// Type alias for the underlying stream
+type BoxedStream = Box<dyn AsyncRead + AsyncWrite + Unpin + Send + Sync>;
+
 /// P2P Relay Connection over WebSocket
 #[allow(dead_code)]
 pub struct P2PRelay {
     /// WebSocket write half
-    writer: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>>>,
+    writer: Arc<Mutex<SplitSink<WebSocketStream<BoxedStream>, Message>>>,
     /// WebSocket read half
-    reader: Arc<Mutex<SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>>>,
+    reader: Arc<Mutex<SplitStream<WebSocketStream<BoxedStream>>>>,
     /// ZKS encryption keys
     keys: Arc<Mutex<ZksKeys>>,
     /// Our peer role
@@ -141,9 +148,44 @@ impl P2PRelay {
         vernam_url: &str,
         room_id: &str,
         role: PeerRole,
+        proxy: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         use crate::key_exchange::{KeyExchange, KeyExchangeMessage};
         use tokio::time::{timeout, Duration};
+
+        // Parse URL
+        let url = Url::parse(relay_url)?;
+        let host = url.host_str().ok_or("No host in relay URL")?;
+        let port = url.port_or_known_default().ok_or("No port in relay URL")?;
+        let scheme = url.scheme();
+
+        // Establish connection (Direct or Proxy)
+        let stream: BoxedStream = if let Some(proxy_addr) = proxy {
+            info!("Connecting via SOCKS5 proxy: {}", proxy_addr);
+            let proxy_socket_addr: SocketAddr = proxy_addr.parse()?;
+            
+            let socks_stream = Socks5Stream::connect(proxy_socket_addr, (host, port)).await?;
+            
+            if scheme == "wss" {
+                let connector = native_tls::TlsConnector::new()?;
+                let connector = tokio_native_tls::TlsConnector::from(connector);
+                let tls_stream = connector.connect(host, socks_stream).await?;
+                Box::new(tls_stream)
+            } else {
+                Box::new(socks_stream)
+            }
+        } else {
+            let tcp_stream = TcpStream::connect((host, port)).await?;
+            
+            if scheme == "wss" {
+                let connector = native_tls::TlsConnector::new()?;
+                let connector = tokio_native_tls::TlsConnector::from(connector);
+                let tls_stream = connector.connect(host, tcp_stream).await?;
+                Box::new(tls_stream)
+            } else {
+                Box::new(tcp_stream)
+            }
+        };
 
         // Build WebSocket URL
         let ws_url = format!(
@@ -155,8 +197,8 @@ impl P2PRelay {
 
         info!("Connecting to relay: {}", ws_url);
 
-        // Connect WebSocket
-        let (ws_stream, response) = tokio_tungstenite::connect_async(&ws_url).await?;
+        // Perform WebSocket handshake
+        let (ws_stream, response) = client_async(ws_url, stream).await?;
         info!("Connected to relay (status: {})", response.status());
 
         // Split into read/write
