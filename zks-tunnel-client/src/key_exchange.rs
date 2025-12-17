@@ -9,7 +9,7 @@
 //! The relay CANNOT decrypt traffic because it never sees the private keys.
 
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2::{Sha256, Digest};
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret};
 
 /// Key exchange state machine
@@ -122,7 +122,6 @@ impl KeyExchange {
             let mut hasher = Sha256::new();
 
             while key_material.len() < target_size {
-                use sha2::Digest; // Import trait here to avoid conflict
                 hasher.update(&seed);
                 hasher.update(&counter.to_le_bytes());
                 let result = hasher.finalize_reset();
