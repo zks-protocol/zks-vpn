@@ -135,6 +135,15 @@ impl TunnelSession {
             TunnelMessage::DnsQuery { request_id, query } => {
                 self.handle_dns(ws, request_id as u16, &query).await;
             }
+            TunnelMessage::HttpRequest {
+                stream_id,
+                method,
+                url,
+                headers,
+                body,
+            } => {
+                self.handle_http_request(ws, stream_id, &method, &url, &headers, &body).await?;
+            }
             _ => {}
         }
 
@@ -198,12 +207,17 @@ impl TunnelSession {
             return Ok(());
         }
 
-        // Cloudflare blocks connect() to port 80. Use fetch() as a fallback.
-        // Port 443 (HTTPS) CAN work via connect() for non-Cloudflare-proxied sites.
+        // Use fetch() for HTTP (80) and HTTPS (443) to bypass Cloudflare connect() limitations.
+        // This allows accessing ALL sites including Cloudflare-proxied ones.
+        // The fetch() API can make HTTPS requests to any destination.
         if port == 80 {
             return self.handle_http_fetch(ws, stream_id, host, false).await;
         }
+        if port == 443 {
+            return self.handle_http_fetch(ws, stream_id, host, true).await;
+        }
 
+        // For other ports (SSH, database, etc.), use direct connect()
         let address = format!("{}:{}", host, port);
 
         match Socket::builder().connect(host, port) {
@@ -246,6 +260,105 @@ impl TunnelSession {
             Err(e) => {
                 // console_error!("[TunnelSession] Connect failed to {}: {:?}", address, e);
                 Self::send_error(ws, stream_id, 502, &format!("Connection failed: {:?}", e));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle HTTP Request via fetch() API (HTTP Forward Proxy mode)
+    /// This is for the new HttpRequest message type that bypasses Cloudflare connect() limitations.
+    async fn handle_http_request(
+        &self,
+        ws: &WebSocket,
+        stream_id: StreamId,
+        method: &str,
+        url: &str,
+        headers: &str,
+        body: &Bytes,
+    ) -> Result<()> {
+        // Parse URL
+        let url_parsed = match Url::parse(url) {
+            Ok(u) => u,
+            Err(e) => {
+                Self::send_error(ws, stream_id, 400, &format!("Invalid URL: {:?}", e));
+                return Ok(());
+            }
+        };
+
+        // Prepare fetch request
+        let mut init = RequestInit::new();
+        init.method = match method {
+            "GET" => Method::Get,
+            "POST" => Method::Post,
+            "HEAD" => Method::Head,
+            "PUT" => Method::Put,
+            "DELETE" => Method::Delete,
+            "PATCH" => Method::Patch,
+            "OPTIONS" => Method::Options,
+            _ => Method::Get,
+        };
+
+        // Parse and set headers
+        let mut req_headers = Headers::new();
+        for line in headers.lines() {
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = value.trim();
+                // Skip Host header - fetch() will set it automatically
+                if key.to_lowercase() != "host" {
+                    let _ = req_headers.set(key, value);
+                }
+            }
+        }
+        init.headers = req_headers;
+
+        // Set body for POST/PUT
+        if !body.is_empty() && (method == "POST" || method == "PUT" || method == "PATCH") {
+            init.body = Some(wasm_bindgen::JsValue::from_str(
+                &String::from_utf8_lossy(body)
+            ));
+        }
+
+        // Make the fetch request
+        let request = match Request::new_with_init(url, &init) {
+            Ok(r) => r,
+            Err(e) => {
+                Self::send_error(ws, stream_id, 500, &format!("Request creation failed: {:?}", e));
+                return Ok(());
+            }
+        };
+
+        match Fetch::Request(request).send().await {
+            Ok(mut response) => {
+                let status = response.status_code();
+                
+                // Collect response headers
+                let mut resp_headers = String::new();
+                for (k, v) in response.headers().entries() {
+                    resp_headers.push_str(&format!("{}: {}\r\n", k, v));
+                }
+
+                // Get response body
+                let body_bytes = match response.bytes().await {
+                    Ok(b) => Bytes::from(b),
+                    Err(_) => Bytes::new(),
+                };
+
+                // Send HttpResponse
+                let resp_msg = TunnelMessage::HttpResponse {
+                    stream_id,
+                    status,
+                    headers: resp_headers,
+                    body: body_bytes,
+                };
+                
+                if let Err(e) = ws.send_with_bytes(&resp_msg.encode()) {
+                    console_error!("[TunnelSession] Failed to send HttpResponse: {:?}", e);
+                }
+            }
+            Err(e) => {
+                Self::send_error(ws, stream_id, 502, &format!("Fetch failed: {:?}", e));
             }
         }
 

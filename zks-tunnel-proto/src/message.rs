@@ -36,6 +36,10 @@ pub enum CommandType {
     DnsResponse = 0x09,
     /// Connection established successfully
     ConnectSuccess = 0x0A,
+    /// HTTP Request (for fetch-based proxying)
+    HttpRequest = 0x0B,
+    /// HTTP Response (from fetch)
+    HttpResponse = 0x0C,
 }
 
 impl TryFrom<u8> for CommandType {
@@ -53,6 +57,8 @@ impl TryFrom<u8> for CommandType {
             0x08 => Ok(Self::DnsQuery),
             0x09 => Ok(Self::DnsResponse),
             0x0A => Ok(Self::ConnectSuccess),
+            0x0B => Ok(Self::HttpRequest),
+            0x0C => Ok(Self::HttpResponse),
             _ => Err(crate::ProtoError::InvalidCommand(value)),
         }
     }
@@ -112,6 +118,31 @@ pub enum TunnelMessage {
     },
     /// Connection established successfully
     ConnectSuccess { stream_id: StreamId },
+    /// HTTP Request for fetch-based proxying (bypasses Cloudflare connect() limitations)
+    /// Worker will use fetch() API to make the request
+    HttpRequest {
+        /// Stream ID for response correlation
+        stream_id: StreamId,
+        /// HTTP method (GET, POST, etc.)
+        method: String,
+        /// Full URL (e.g., "https://google.com/path")
+        url: String,
+        /// Request headers as "Key: Value\r\n" concatenated
+        headers: String,
+        /// Optional request body
+        body: Bytes,
+    },
+    /// HTTP Response from fetch
+    HttpResponse {
+        /// Stream ID matching the request
+        stream_id: StreamId,
+        /// HTTP status code
+        status: u16,
+        /// Response headers as "Key: Value\r\n" concatenated
+        headers: String,
+        /// Response body
+        body: Bytes,
+    },
 }
 
 impl TunnelMessage {
@@ -202,6 +233,38 @@ impl TunnelMessage {
             TunnelMessage::ConnectSuccess { stream_id } => {
                 buf.put_u8(CommandType::ConnectSuccess as u8);
                 buf.put_u32(*stream_id);
+            }
+            TunnelMessage::HttpRequest {
+                stream_id,
+                method,
+                url,
+                headers,
+                body,
+            } => {
+                buf.put_u8(CommandType::HttpRequest as u8);
+                buf.put_u32(*stream_id);
+                buf.put_u16(method.len() as u16);
+                buf.put_slice(method.as_bytes());
+                buf.put_u16(url.len() as u16);
+                buf.put_slice(url.as_bytes());
+                buf.put_u16(headers.len() as u16);
+                buf.put_slice(headers.as_bytes());
+                buf.put_u32(body.len() as u32);
+                buf.put_slice(body);
+            }
+            TunnelMessage::HttpResponse {
+                stream_id,
+                status,
+                headers,
+                body,
+            } => {
+                buf.put_u8(CommandType::HttpResponse as u8);
+                buf.put_u32(*stream_id);
+                buf.put_u16(*status);
+                buf.put_u16(headers.len() as u16);
+                buf.put_slice(headers.as_bytes());
+                buf.put_u32(body.len() as u32);
+                buf.put_slice(body);
             }
         }
 
@@ -359,6 +422,98 @@ impl TunnelMessage {
                 }
                 let stream_id = cursor.get_u32();
                 Ok(TunnelMessage::ConnectSuccess { stream_id })
+            }
+            CommandType::HttpRequest => {
+                if cursor.remaining() < 6 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let stream_id = cursor.get_u32();
+                
+                let method_len = cursor.get_u16() as usize;
+                if cursor.remaining() < method_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let mut method_bytes = vec![0u8; method_len];
+                cursor.copy_to_slice(&mut method_bytes);
+                let method = String::from_utf8(method_bytes)
+                    .map_err(|_| crate::ProtoError::InvalidUtf8)?;
+
+                if cursor.remaining() < 2 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let url_len = cursor.get_u16() as usize;
+                if cursor.remaining() < url_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let mut url_bytes = vec![0u8; url_len];
+                cursor.copy_to_slice(&mut url_bytes);
+                let url = String::from_utf8(url_bytes)
+                    .map_err(|_| crate::ProtoError::InvalidUtf8)?;
+
+                if cursor.remaining() < 2 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let headers_len = cursor.get_u16() as usize;
+                if cursor.remaining() < headers_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let mut headers_bytes = vec![0u8; headers_len];
+                cursor.copy_to_slice(&mut headers_bytes);
+                let headers = String::from_utf8(headers_bytes)
+                    .map_err(|_| crate::ProtoError::InvalidUtf8)?;
+
+                if cursor.remaining() < 4 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let body_len = cursor.get_u32() as usize;
+                if cursor.remaining() < body_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let body = Bytes::copy_from_slice(
+                    &data[cursor.position() as usize..][..body_len]
+                );
+
+                Ok(TunnelMessage::HttpRequest {
+                    stream_id,
+                    method,
+                    url,
+                    headers,
+                    body,
+                })
+            }
+            CommandType::HttpResponse => {
+                if cursor.remaining() < 8 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let stream_id = cursor.get_u32();
+                let status = cursor.get_u16();
+                
+                let headers_len = cursor.get_u16() as usize;
+                if cursor.remaining() < headers_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let mut headers_bytes = vec![0u8; headers_len];
+                cursor.copy_to_slice(&mut headers_bytes);
+                let headers = String::from_utf8(headers_bytes)
+                    .map_err(|_| crate::ProtoError::InvalidUtf8)?;
+
+                if cursor.remaining() < 4 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let body_len = cursor.get_u32() as usize;
+                if cursor.remaining() < body_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let body = Bytes::copy_from_slice(
+                    &data[cursor.position() as usize..][..body_len]
+                );
+
+                Ok(TunnelMessage::HttpResponse {
+                    stream_id,
+                    status,
+                    headers,
+                    body,
+                })
             }
         }
     }

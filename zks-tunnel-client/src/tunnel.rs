@@ -27,17 +27,21 @@ struct StreamState {
 }
 
 type PendingMap = Arc<Mutex<HashMap<StreamId, oneshot::Sender<Result<(), String>>>>>;
+type HttpResponseMap = Arc<Mutex<HashMap<StreamId, mpsc::Sender<TunnelMessage>>>>;
 
 /// Production-grade tunnel client with connection multiplexing
+#[derive(Clone)]
 pub struct TunnelClient {
     /// Sender for outgoing messages
     sender: mpsc::Sender<TunnelMessage>,
     /// Next stream ID (atomic for thread-safety)
-    next_stream_id: AtomicU32,
+    next_stream_id: Arc<AtomicU32>,
     /// Active streams - maps stream_id to sender for that stream's data
     streams: Arc<Mutex<HashMap<StreamId, StreamState>>>,
     /// Pending connection requests - maps stream_id to oneshot sender for result
     pending_connections: PendingMap,
+    /// Pending HTTP requests - maps stream_id to channel for HttpResponse
+    pending_http_requests: HttpResponseMap,
 }
 
 impl TunnelClient {
@@ -61,6 +65,10 @@ impl TunnelClient {
         // Pending connections map - shared between reader task and main client
         let pending_connections: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_connections_clone = pending_connections.clone();
+
+        // Pending HTTP requests map - shared between reader task and main client
+        let pending_http_requests: HttpResponseMap = Arc::new(Mutex::new(HashMap::new()));
+        let pending_http_clone = pending_http_requests.clone();
 
         // Spawn writer task - sends messages from channel to WebSocket
         let writer_handle = tokio::spawn(async move {
@@ -132,6 +140,24 @@ impl TunnelClient {
                                         );
                                     }
                                 }
+                                TunnelMessage::HttpResponse { stream_id, status, headers, body } => {
+                                    let mut pending = pending_http_clone.lock().await;
+                                    if let Some(tx) = pending.remove(&stream_id) {
+                                        // Reconstruct the message to send
+                                        let resp = TunnelMessage::HttpResponse {
+                                            stream_id,
+                                            status,
+                                            headers,
+                                            body,
+                                        };
+                                        let _ = tx.send(resp).await;
+                                    } else {
+                                        warn!(
+                                            "Received HttpResponse for unknown stream {}",
+                                            stream_id
+                                        );
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -155,9 +181,10 @@ impl TunnelClient {
 
         Ok(Self {
             sender,
-            next_stream_id: AtomicU32::new(1),
+            next_stream_id: Arc::new(AtomicU32::new(1)),
             streams,
             pending_connections,
+            pending_http_requests,
         })
     }
 
@@ -317,5 +344,41 @@ impl TunnelClient {
     #[allow(dead_code)]
     pub fn sender(&self) -> mpsc::Sender<TunnelMessage> {
         self.sender.clone()
+    }
+
+    /// Get the next stream ID
+    pub fn get_next_stream_id(&self) -> StreamId {
+        self.next_stream_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Register a pending HTTP request and return a receiver for the response
+    pub fn register_http_request(&self, stream_id: StreamId) -> Result<mpsc::Receiver<TunnelMessage>, Box<dyn std::error::Error + Send + Sync>> {
+        let (tx, rx) = mpsc::channel(1);
+        
+        // Use try_lock to avoid async in sync context
+        // This might fail if lock is held, but for initialization it should be fine
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(async {
+            let mut pending = self.pending_http_requests.lock().await;
+            pending.insert(stream_id, tx);
+        });
+        
+        Ok(rx)
+    }
+
+    /// Send a message through the tunnel
+    pub fn send_message(&self, msg: TunnelMessage) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.sender.try_send(msg).map_err(|e| format!("Failed to send message: {}", e))?;
+        Ok(())
+    }
+
+    /// Send data to a stream
+    pub fn send_data(&self, stream_id: StreamId, payload: Bytes) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.send_message(TunnelMessage::Data { stream_id, payload })
+    }
+
+    /// Close a stream
+    pub fn close_stream(&self, stream_id: StreamId) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.send_message(TunnelMessage::Close { stream_id })
     }
 }

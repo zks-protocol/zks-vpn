@@ -19,11 +19,13 @@ use tokio::net::TcpListener;
 use tracing::{error, info, Level};
 use tracing_subscriber::FmtSubscriber;
 
+mod http_proxy;
 mod socks5;
 mod stream_manager;
 mod tunnel;
 mod vpn;
 
+use http_proxy::HttpProxyServer;
 use socks5::Socks5Server;
 use tunnel::TunnelClient;
 
@@ -35,9 +37,11 @@ use vpn::{VpnConfig, VpnController};
 /// Operating mode for the VPN client
 #[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq)]
 pub enum Mode {
-    /// SOCKS5 proxy mode (browser only)
+    /// SOCKS5 proxy mode (browser only, raw TCP)
     #[default]
     Socks5,
+    /// HTTP proxy mode (uses fetch() for HTTPS, works with all sites)
+    Http,
     /// System-wide VPN mode (all traffic)
     Vpn,
 }
@@ -114,6 +118,7 @@ async fn main() -> Result<(), BoxError> {
 
     match args.mode {
         Mode::Socks5 => run_socks5_mode(args, tunnel).await,
+        Mode::Http => run_http_proxy_mode(args, tunnel).await,
         Mode::Vpn => run_vpn_mode(args, tunnel).await,
     }
 }
@@ -128,6 +133,13 @@ fn print_banner(args: &Args) {
     match args.mode {
         Mode::Socks5 => {
             info!("║  Mode:   SOCKS5 Proxy (browser only)                        ║");
+            info!(
+                "║  Listen: {}:{}                                  ",
+                args.bind, args.port
+            );
+        }
+        Mode::Http => {
+            info!("║  Mode:   HTTP Proxy (HTTPS via fetch, all sites work)      ║");
             info!(
                 "║  Listen: {}:{}                                  ",
                 args.bind, args.port
@@ -165,6 +177,26 @@ async fn run_socks5_mode(args: Args, tunnel: TunnelClient) -> Result<(), BoxErro
 
     let socks_server = Socks5Server::new(tunnel);
     socks_server.run(listener).await?;
+
+    Ok(())
+}
+
+/// Run in HTTP proxy mode (uses fetch() for HTTPS)
+async fn run_http_proxy_mode(args: Args, tunnel: TunnelClient) -> Result<(), BoxError> {
+    let bind_addr: SocketAddr = format!("{}:{}", args.bind, args.port).parse()?;
+    let listener = TcpListener::bind(bind_addr).await?;
+
+    info!("🚀 HTTP proxy listening on {}", bind_addr);
+    info!(
+        "   Configure your browser to use HTTP proxy: {}:{}",
+        args.bind, args.port
+    );
+    info!("");
+    info!("   ✅ HTTPS sites work via Cloudflare fetch() API");
+    info!("   ✅ All Cloudflare-proxied sites are accessible");
+
+    let http_server = HttpProxyServer::new(tunnel);
+    http_server.run(listener).await?;
 
     Ok(())
 }

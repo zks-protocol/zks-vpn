@@ -269,14 +269,16 @@ mod implementation {
                                 }
 
                                 // Open tunnel stream to destination
-                                let dest_host: String = dst_addr.to_string(); // Destination is the target
+                                let dest_host = dst_addr.ip().to_string(); // Send only the IP
                                 let dest_port = dst_addr.port();
+
+                                debug!("Opening tunnel to {}:{}", dest_host, dest_port);
 
                                 match tunnel.open_stream(&dest_host, dest_port).await {
                                     Ok((stream_id, rx)) => {
                                         debug!(
-                                            "Tunnel stream {} opened for {}",
-                                            stream_id, dst_addr
+                                            "Tunnel stream {} opened for {}:{}",
+                                            stream_id, dest_host, dest_port
                                         );
 
                                         // Relay data
