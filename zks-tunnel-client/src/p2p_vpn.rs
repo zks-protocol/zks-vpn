@@ -30,7 +30,7 @@ mod implementation {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
     use tracing::{debug, error, info, warn};
 
     use crate::p2p_relay::{P2PRelay, PeerRole};
@@ -114,6 +114,7 @@ mod implementation {
         http_client: Client,
         next_stream_id: Arc<AtomicU32>,
         streams: Arc<RwLock<HashMap<StreamId, StreamState>>>,
+        dns_pending: Arc<RwLock<HashMap<u32, oneshot::Sender<Vec<u8>>>>>,
         #[cfg(target_os = "windows")]
         original_fw_policy: Arc<Mutex<Option<String>>>,
     }
@@ -133,6 +134,7 @@ mod implementation {
                     .unwrap_or_default(),
                 next_stream_id: Arc::new(AtomicU32::new(1)),
                 streams: Arc::new(RwLock::new(HashMap::new())),
+                dns_pending: Arc::new(RwLock::new(HashMap::new())),
                 #[cfg(target_os = "windows")]
                 original_fw_policy: Arc::new(Mutex::new(None)),
             }
@@ -199,8 +201,10 @@ mod implementation {
             let stats = self.stats.clone();
             let running = self.running.clone();
 
+            let dns_pending = self.dns_pending.clone();
+
             tokio::spawn(async move {
-                Self::handle_relay_messages(relay_clone, streams, stats, running).await;
+                Self::handle_relay_messages(relay_clone, streams, dns_pending, stats, running).await;
             });
 
             // Create TUN device and start packet processing
@@ -220,6 +224,7 @@ mod implementation {
         async fn handle_relay_messages(
             relay: Arc<P2PRelay>,
             streams: Arc<RwLock<HashMap<StreamId, StreamState>>>,
+            dns_pending: Arc<RwLock<HashMap<u32, oneshot::Sender<Vec<u8>>>>>,
             stats: Arc<Mutex<P2PVpnStats>>,
             running: Arc<AtomicBool>,
         ) {
@@ -263,6 +268,12 @@ mod implementation {
                                 response.len()
                             );
                             // Handle DNS response - route to appropriate handler
+                            let mut pending = dns_pending.write().await;
+                            if let Some(tx) = pending.remove(&request_id) {
+                                let _ = tx.send(response);
+                            } else {
+                                warn!("Received DNS response for unknown request {}", request_id);
+                            }
                         }
                         _ => {
                             debug!("Received unhandled message type");
@@ -584,9 +595,18 @@ mod implementation {
                     let _relay = relay_for_udp;
                 }
 
-                // Keep UDP socket alive
+                let mut buf = [0u8; 2048];
                 while running_udp.load(Ordering::SeqCst) {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    // Drain UDP packets to prevent buffer fill-up
+                    // In a full implementation, we would parse the destination and forward
+                    if let Ok(Ok((len, src_addr))) = tokio::time::timeout(
+                        tokio::time::Duration::from_secs(1),
+                        udp_socket.recv_from(&mut buf),
+                    )
+                    .await
+                    {
+                        debug!("Received UDP packet from {} ({} bytes) - dropping", src_addr, len);
+                    }
                 }
                 drop(udp_socket);
             });
