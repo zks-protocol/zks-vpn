@@ -122,8 +122,12 @@ impl ZksKeys {
     }
 }
 
+/// Trait combining all required stream traits
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send + Sync> Stream for T {}
+
 /// Type alias for the underlying stream
-type BoxedStream = Box<dyn AsyncRead + AsyncWrite + Unpin + Send + Sync>;
+type BoxedStream = Box<dyn Stream>;
 
 /// P2P Relay Connection over WebSocket
 #[allow(dead_code)]

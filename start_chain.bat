@@ -14,7 +14,7 @@ timeout /t 5 /nobreak >nul
 echo.
 echo [2/2] Starting ZKS VPN Client...
 echo       (Routing: You -> Proxy(VM1) -> Relay -> VM2)
-cd zks-tunnel-client
-target\release\zks-vpn.exe --mode p2p-vpn --room triple-blind-test --proxy 127.0.0.1:9050 --relay wss://zks-tunnel-relay.md-wasif-faisal.workers.dev
+echo       (Make sure zks-vpn.exe is in this folder!)
+zks-vpn.exe --mode p2p-vpn --room triple-blind-test --proxy 127.0.0.1:9050 --relay wss://zks-tunnel-relay.md-wasif-faisal.workers.dev
 
 pause
