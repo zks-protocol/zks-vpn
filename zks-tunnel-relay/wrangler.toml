@@ -7,9 +7,15 @@ command = "cargo install -q worker-build && worker-build --release"
 
 [durable_objects]
 bindings = [
-  { name = "VPN_ROOM", class_name = "VpnRoom" }
+  { name = "VPN_ROOM", class_name = "VpnRoom" },
+  { name = "ENTROPY_POOL", class_name = "EntropyPool" }
 ]
 
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["VpnRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["EntropyPool"]
+

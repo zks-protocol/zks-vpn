@@ -1,8 +1,10 @@
 # Zero Knowledge Swarm (ZKS) Protocol Specification (v2.0)
 
 **Status**: Draft
-**Author**: ZKS Team
+**Author**: Wasif Faisal (ZKS Team)
 **Date**: 2025-12-17
+**License**: AGPLv3
+**Copyright**: © 2025 Wasif Faisal. The concepts "Faisal-Swarm Topology" and "ZKS Protocol" are original inventions of the author.
 
 ## 1. Abstract
 The ZKS-Revised Protocol is a trustless, metadata-free overlay network designed to provide stronger anonymity than Tor. It eliminates the "Direct Connection" vulnerability of onion routing by introducing **Blind Relays** and replaces trusted directory authorities with **Swarm Entropy** for key generation.

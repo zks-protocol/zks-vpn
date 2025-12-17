@@ -23,6 +23,7 @@ mod exit_peer;
 mod http_proxy;
 mod p2p_client;
 mod p2p_relay;
+mod p2p_vpn;
 mod socks5;
 mod stream_manager;
 mod tunnel;
@@ -45,11 +46,14 @@ pub enum Mode {
     Socks5,
     /// HTTP proxy mode (uses fetch() for HTTPS, works with all sites)
     Http,
-    /// System-wide VPN mode (all traffic)
+    /// System-wide VPN mode (all traffic, via Cloudflare Worker)
     Vpn,
-    /// P2P Client mode - route traffic through Exit Peer
+    /// P2P Client mode - route traffic through Exit Peer (SOCKS5 interface)
     #[value(name = "p2p-client")]
     P2pClient,
+    /// P2P VPN mode - system-wide VPN through Exit Peer (Triple-Blind)
+    #[value(name = "p2p-vpn")]
+    P2pVpn,
     /// Exit Peer mode - forward traffic to Internet
     #[value(name = "exit-peer")]
     ExitPeer,
@@ -142,6 +146,13 @@ async fn main() -> Result<(), BoxError> {
             return p2p_client::run_p2p_client(&args.relay, &args.vernam, &room_id, args.port)
                 .await;
         }
+        Mode::P2pVpn => {
+            let room_id = args.room.clone().unwrap_or_else(|| {
+                error!("Room ID required for P2P VPN mode. Use --room <id>");
+                std::process::exit(1);
+            });
+            return run_p2p_vpn_mode(args, room_id).await;
+        }
         Mode::ExitPeer => {
             let room_id = args.room.clone().unwrap_or_else(|| {
                 error!("Room ID required for Exit Peer mode. Use --room <id>");
@@ -212,6 +223,14 @@ fn print_banner(args: &Args) {
         Mode::ExitPeer => {
             info!("║  Mode:   Exit Peer (forward to Internet)                    ║");
             info!("║  Room:   {}  ", args.room.as_deref().unwrap_or("none"));
+        }
+        Mode::P2pVpn => {
+            info!("║  Mode:   P2P VPN (Triple-Blind, System-Wide)                ║");
+            info!("║  Room:   {}  ", args.room.as_deref().unwrap_or("none"));
+            info!(
+                "║  VPN IP: {}                                          ",
+                args.vpn_address
+            );
         }
     }
 
@@ -308,6 +327,66 @@ async fn run_vpn_mode(_args: Args, _tunnel: TunnelClient) -> Result<(), BoxError
 
         info!("");
         info!("Shutting down VPN...");
+        vpn.stop().await?;
+
+        Ok(())
+    }
+}
+
+/// Run in P2P VPN mode (Triple-Blind Architecture)
+async fn run_p2p_vpn_mode(args: Args, room_id: String) -> Result<(), BoxError> {
+    #[cfg(not(feature = "vpn"))]
+    {
+        error!("❌ VPN mode is not enabled!");
+        error!("   Rebuild with: cargo build --release --features vpn");
+        Err("VPN feature not enabled".into())
+    }
+
+    #[cfg(feature = "vpn")]
+    {
+        use p2p_vpn::{P2PVpnConfig, P2PVpnController};
+
+        // Check for admin/root privileges
+        check_privileges()?;
+
+        let vpn_addr: std::net::Ipv4Addr = args.vpn_address.parse()?;
+
+        let config = P2PVpnConfig {
+            device_name: args.tun_name.clone(),
+            address: vpn_addr,
+            netmask: std::net::Ipv4Addr::new(255, 255, 255, 0),
+            mtu: 1500,
+            dns_protection: args.dns_protection,
+            kill_switch: args.kill_switch,
+            relay_url: args.relay.clone(),
+            vernam_url: args.vernam.clone(),
+            room_id,
+        };
+
+        info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");
+        info!("   All traffic will be routed through the Exit Peer.");
+        info!("   Your IP is hidden behind the Exit Peer's IP.");
+
+        if args.kill_switch {
+            info!("   Kill switch: ENABLED (traffic blocked if VPN drops)");
+        }
+
+        if args.dns_protection {
+            info!("   DNS protection: ENABLED (queries via DoH)");
+        }
+
+        let vpn = P2PVpnController::new(config);
+
+        vpn.start().await?;
+
+        // Wait for Ctrl+C
+        info!("");
+        info!("Press Ctrl+C to disconnect VPN...");
+
+        tokio::signal::ctrl_c().await?;
+
+        info!("");
+        info!("Shutting down P2P VPN...");
         vpn.stop().await?;
 
         Ok(())

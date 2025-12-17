@@ -10,11 +10,17 @@
  *   Client <--[ZKS Encrypted]--> Relay <--[ZKS Encrypted]--> Exit Peer
  *                                  |
  *                        (Cannot decrypt traffic)
+ *
+ * Swarm Entropy:
+ *   All peers contribute entropy to the Global Entropy Pool.
+ *   K_Remote = XOR(E_P1, E_P2, ..., E_PN) where N = 10 by default.
  */
 use worker::*;
 
+mod entropy_pool;
 mod vpn_room;
 
+pub use entropy_pool::EntropyPool;
 pub use vpn_room::VpnRoom;
 
 #[event(fetch)]
@@ -41,16 +47,28 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         return stub.fetch_with_request(req).await;
     }
 
+    // Entropy Pool endpoint: /entropy or /entropy/...
+    if path.starts_with("/entropy") {
+        // Use a single global entropy pool
+        let namespace = env.durable_object("ENTROPY_POOL")?;
+        let id = namespace.id_from_name("global")?;
+        let stub = id.get_stub()?;
+
+        return stub.fetch_with_request(req).await;
+    }
+
     // Health check endpoint
     if path == "/health" || path == "/" {
         return Response::ok(
             serde_json::json!({
                 "status": "ok",
                 "service": "zks-tunnel-relay",
-                "version": "0.1.0",
-                "description": "ZKS-VPN P2P Relay with double-key Vernam encryption",
+                "version": "0.2.0",
+                "description": "ZKS-VPN P2P Relay with Swarm Entropy",
                 "endpoints": {
                     "vpn_room": "/room/<room_id>?role=client|exit",
+                    "entropy": "/entropy?size=32&n=10",
+                    "entropy_ws": "wss://.../entropy (WebSocket for contributions)",
                     "health": "/health"
                 }
             })
@@ -58,5 +76,6 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
         );
     }
 
-    Response::error("Not Found. Use /room/<room_id>", 404)
+    Response::error("Not Found. Use /room/<room_id> or /entropy", 404)
 }
+
