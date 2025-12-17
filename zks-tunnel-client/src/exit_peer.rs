@@ -132,6 +132,14 @@ pub async fn run_exit_peer(
                         });
                     }
 
+                    TunnelMessage::DnsQuery { request_id, query } => {
+                        info!("DNS Query ID {}", request_id);
+                        let relay_clone = relay_clone.clone();
+                        tokio::spawn(async move {
+                            handle_dns_query(relay_clone, request_id, query).await;
+                        });
+                    }
+
                     _ => {
                         debug!("Unhandled message: {:?}", message);
                     }
@@ -333,6 +341,47 @@ async fn handle_http_request(
                     message: format!("HTTP request failed: {}", e),
                 })
                 .await;
+        }
+    }
+}
+
+/// Handle DNS query by forwarding to public DNS
+async fn handle_dns_query(relay: Arc<P2PRelay>, request_id: u32, query: Bytes) {
+    // Use a fresh socket for each query
+    let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to bind UDP socket for DNS: {}", e);
+            return;
+        }
+    };
+
+    // Send to Google DNS (8.8.8.8)
+    if let Err(e) = socket.send_to(&query, "8.8.8.8:53").await {
+        warn!("Failed to send DNS query to 8.8.8.8: {}", e);
+        return;
+    }
+
+    let mut buf = [0u8; 2048];
+    // Wait for response with timeout
+    match tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        socket.recv_from(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok((len, _))) => {
+            let response = Bytes::copy_from_slice(&buf[..len]);
+            let _ = relay
+                .send(&TunnelMessage::DnsResponse {
+                    request_id,
+                    response,
+                })
+                .await;
+            debug!("Forwarded DNS response for ID {}", request_id);
+        }
+        _ => {
+            warn!("DNS query timeout or error for ID {}", request_id);
         }
     }
 }
