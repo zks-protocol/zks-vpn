@@ -207,7 +207,15 @@ mod implementation {
             let dns_response_tx = self.dns_response_tx.clone();
 
             tokio::spawn(async move {
-                Self::handle_relay_messages(relay_clone, streams, dns_pending, dns_response_tx, stats, running).await;
+                Self::handle_relay_messages(
+                    relay_clone,
+                    streams,
+                    dns_pending,
+                    dns_response_tx,
+                    stats,
+                    running,
+                )
+                .await;
             });
 
             // Create TUN device and start packet processing
@@ -621,19 +629,18 @@ mod implementation {
                                 // Try to parse as DNS
                                 if let Ok(packet) = simple_dns::Packet::parse(packet_data) {
                                     let request_id = packet.id();
-                                    
                                     // Store pending
                                     {
                                         let mut pending = dns_pending.write().await;
                                         pending.insert(request_id as u32, src_addr);
                                     }
-                                    
+
                                     // Send to relay
                                     let msg = TunnelMessage::DnsQuery {
                                         request_id: request_id as u32,
                                         query: Bytes::copy_from_slice(packet_data),
                                     };
-                                    
+
                                     if let Err(e) = relay_for_udp.send(&msg).await {
                                         warn!("Failed to send DNS query: {}", e);
                                     } else {
