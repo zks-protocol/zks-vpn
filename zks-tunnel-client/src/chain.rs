@@ -46,6 +46,7 @@ pub struct ChainConfig {
     pub hops: Vec<HopConfig>,
 }
 
+#[allow(dead_code)]
 impl ChainConfig {
     /// Create a new chain config
     pub fn new() -> Self {
