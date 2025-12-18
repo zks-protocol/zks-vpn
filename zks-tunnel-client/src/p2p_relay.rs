@@ -475,6 +475,18 @@ impl P2PRelay {
                 Message::Text(text) => {
                     // Control message from relay (welcome, peer_join, etc.)
                     debug!("Relay control message: {}", text);
+
+                    // CRITICAL: If peer joins/leaves or sends a new key, we MUST restart the session
+                    // because we threw away our private key after the initial handshake.
+                    // We cannot re-key without reconnecting.
+                    if text.contains("peer_join")
+                        || text.contains("PeerJoin")
+                        || text.contains("peer_leave")
+                        || text.contains("PeerLeave")
+                        || text.contains("public_key")
+                    {
+                        return Err("Peer state changed - restarting session to re-key".into());
+                    }
                 }
                 Message::Close(_) => {
                     info!("Relay connection closed");

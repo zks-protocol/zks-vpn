@@ -444,13 +444,6 @@ pub async fn run_exit_peer_vpn(
     info!("║  Relay: {:52} ║", relay_url);
     info!("╚══════════════════════════════════════════════════════════════╝");
 
-    // Connect to relay as Exit Peer
-    let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await?;
-    let relay = Arc::new(relay);
-
-    info!("✅ Connected to relay as Exit Peer (VPN Mode)");
-    info!("⏳ Waiting for Client to connect...");
-
     // Create TUN device for packet forwarding (10.0.85.2 for exit peer)
     info!("Creating TUN device for VPN forwarding...");
 
@@ -486,86 +479,127 @@ pub async fn run_exit_peer_vpn(
     }
 
     let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    // Wrap TUN device in Arc for sharing
     let device = Arc::new(device);
-    let device_reader = device.clone();
-    let device_writer = device.clone();
 
-    // Clone relay for tasks
-    let relay_for_recv = relay.clone();
-    let relay_for_send = relay.clone();
-
-    // Task 1: Relay -> TUN (packets from Client to Internet)
-    let _relay_to_tun = tokio::spawn(async move {
-        while running_clone.load(Ordering::SeqCst) {
-            match relay_for_recv.recv().await {
-                Ok(Some(TunnelMessage::IpPacket { payload })) => {
-                    debug!("Received IpPacket: {} bytes", payload.len());
-                    if let Err(e) = device_writer.send(&payload).await {
-                        warn!("Failed to write to TUN: {}", e);
-                    }
-                }
-                Ok(Some(other)) => {
-                    debug!("Received non-IpPacket message: {:?}", other);
-                }
-                Ok(None) => {
-                    info!("Relay connection closed");
-                    break;
-                }
-                Err(e) => {
-                    error!("Error receiving from relay: {}", e);
-                    break;
-                }
-            }
+    // Main reconnection loop
+    loop {
+        if !running.load(Ordering::SeqCst) {
+            break;
         }
-    });
 
-    // Task 2: TUN -> Relay (packets from Internet to Client)
-    let running_clone2 = running.clone();
-    let _tun_to_relay = tokio::spawn(async move {
-        let mut buf = vec![0u8; 2048];
-        while running_clone2.load(Ordering::SeqCst) {
-            // Use timeout to allow checking 'running' flag periodically
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(1),
-                device_reader.recv(&mut buf),
-            )
-            .await
+        info!("Connecting to relay...");
+        // Connect to relay as Exit Peer
+        let relay =
+            match P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await
             {
-                Ok(Ok(n)) => {
-                    let packet = &buf[..n];
-                    debug!("TUN read: {} bytes", n);
-
-                    // Send packet to Client
-                    let msg = TunnelMessage::IpPacket {
-                        payload: Bytes::copy_from_slice(packet),
-                    };
-                    if let Err(e) = relay_for_send.send(&msg).await {
-                        warn!("Failed to send IpPacket to relay: {}", e);
-                    }
-                }
-                Ok(Err(e)) => {
-                    error!("TUN read error: {}", e);
-                    break;
-                }
-                Err(_) => {
-                    // Timeout - just loop to check running flag
+                Ok(r) => Arc::new(r),
+                Err(e) => {
+                    error!("Failed to connect to relay: {}. Retrying in 5s...", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     continue;
                 }
+            };
+
+        info!("✅ Connected to relay as Exit Peer (VPN Mode)");
+        info!("⏳ Waiting for Client to connect...");
+
+        let running_clone = running.clone();
+        let device_reader = device.clone();
+        let device_writer = device.clone();
+
+        // Clone relay for tasks
+        let relay_for_recv = relay.clone();
+        let relay_for_send = relay.clone();
+
+        // Task 1: Relay -> TUN (packets from Client to Internet)
+        let relay_to_tun = tokio::spawn(async move {
+            while running_clone.load(Ordering::SeqCst) {
+                match relay_for_recv.recv().await {
+                    Ok(Some(TunnelMessage::IpPacket { payload })) => {
+                        debug!("Received IpPacket: {} bytes", payload.len());
+                        if let Err(e) = device_writer.send(&payload).await {
+                            warn!("Failed to write to TUN: {}", e);
+                        }
+                    }
+                    Ok(Some(other)) => {
+                        debug!("Received non-IpPacket message: {:?}", other);
+                    }
+                    Ok(None) => {
+                        info!("Relay connection closed");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Error receiving from relay: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Task 2: TUN -> Relay (packets from Internet to Client)
+        let running_clone2 = running.clone();
+        let tun_to_relay = tokio::spawn(async move {
+            let mut buf = vec![0u8; 2048];
+            while running_clone2.load(Ordering::SeqCst) {
+                // Use timeout to allow checking 'running' flag periodically
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(1),
+                    device_reader.recv(&mut buf),
+                )
+                .await
+                {
+                    Ok(Ok(n)) => {
+                        let packet = &buf[..n];
+                        debug!("TUN read: {} bytes", n);
+
+                        // Send packet to Client
+                        let msg = TunnelMessage::IpPacket {
+                            payload: Bytes::copy_from_slice(packet),
+                        };
+                        if let Err(e) = relay_for_send.send(&msg).await {
+                            warn!("Failed to send IpPacket to relay: {}", e);
+                            // If sending fails, the relay connection is likely dead.
+                            // We should probably break to trigger reconnection, but
+                            // the recv loop will likely detect it too.
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("TUN read error: {}", e);
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - just loop to check running flag
+                        continue;
+                    }
+                }
+            }
+            info!("Exit Peer TUN reader task stopped");
+        });
+
+        info!("✅ Exit Peer VPN mode active - forwarding packets");
+        info!("Press Ctrl+C to stop...");
+
+        // Wait for tasks to finish OR Ctrl+C
+        tokio::select! {
+            _ = relay_to_tun => {
+                warn!("Relay connection lost (recv task ended). Reconnecting...");
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("Ctrl+C received. Shutting down...");
+                running.store(false, Ordering::SeqCst);
+                break;
             }
         }
-        info!("Exit Peer TUN reader task stopped");
-    });
 
-    info!("✅ Exit Peer VPN mode active - forwarding packets");
-    info!("Press Ctrl+C to stop...");
+        // Abort the other task if it's still running
+        tun_to_relay.abort();
 
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
+        if running.load(Ordering::SeqCst) {
+            info!("Restarting session in 1s...");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
 
-    running.store(false, Ordering::SeqCst);
     info!("Shutting down Exit Peer VPN mode...");
 
     // Cleanup NAT rules on Linux
