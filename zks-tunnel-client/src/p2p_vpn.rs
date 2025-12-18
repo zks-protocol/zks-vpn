@@ -458,30 +458,84 @@ mod implementation {
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_string()));
 
-                    // Add default route through TUN interface with low metric
-                    let gateway = format!("{}", self.config.address);
+                    // First, get the current default gateway (for relay host route)
+                    let gateway_output = Command::new("powershell")
+                        .args([
+                            "-Command",
+                            "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop",
+                        ])
+                        .output();
+
+                    let original_gateway = gateway_output.ok().and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse::<std::net::Ipv4Addr>()
+                            .ok()
+                    });
+
+                    // If we have a relay host, add a specific route through original gateway first
+                    if let (Some(host), Some(orig_gw)) = (&relay_host, original_gateway) {
+                        info!("Adding direct route for relay host: {}", host);
+                        // Resolve hostname to IP
+                        if let Ok(addrs) =
+                            std::net::ToSocketAddrs::to_socket_addrs(&format!("{}:443", host))
+                        {
+                            for addr in addrs {
+                                if let std::net::SocketAddr::V4(v4) = addr {
+                                    let relay_ip = v4.ip().to_string();
+                                    let _ = Command::new("route")
+                                        .args([
+                                            "add",
+                                            &relay_ip,
+                                            "mask",
+                                            "255.255.255.255",
+                                            &orig_gw.to_string(),
+                                            "metric",
+                                            "1",
+                                        ])
+                                        .output();
+                                    info!("Added relay route: {} via {}", relay_ip, orig_gw);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Delete existing default route first to avoid conflicts
+                    let _ = Command::new("route")
+                        .args(["delete", "0.0.0.0", "mask", "0.0.0.0"])
+                        .output();
+
+                    // Add default route through TUN interface with metric 1
+                    // Use the TUN IP as the interface address
+                    let tun_ip = format!("{}", self.config.address);
                     let add_default = Command::new("route")
-                        .args(["add", "0.0.0.0", "mask", "0.0.0.0", &gateway, "metric", "5"])
+                        .args([
+                            "add", "0.0.0.0", "mask", "0.0.0.0", &tun_ip, "metric", "1", "IF",
+                            "47", // TUN interface ID (tun0 Tunnel #2)
+                        ])
                         .output();
 
                     match add_default {
                         Ok(output) if output.status.success() => {
-                            info!("✅ Default route added via {}", gateway);
+                            info!("✅ Default route added via {} on TUN interface", tun_ip);
                         }
                         Ok(output) => {
+                            // Try without IF parameter as fallback
                             warn!(
-                                "Route add returned: {}",
+                                "Route with IF failed: {}",
                                 String::from_utf8_lossy(&output.stderr)
                             );
+                            let fallback = Command::new("route")
+                                .args(["add", "0.0.0.0", "mask", "0.0.0.0", &tun_ip, "metric", "1"])
+                                .output();
+                            if fallback.map(|o| o.status.success()).unwrap_or(false) {
+                                info!("✅ Default route added via {} (fallback)", tun_ip);
+                            }
                         }
                         Err(e) => {
                             warn!("Failed to add default route: {}", e);
                         }
-                    }
-
-                    // If we have a relay host, add a specific route for it via the original gateway
-                    if let Some(host) = relay_host {
-                        debug!("Relay host: {} (keeping direct route)", host);
                     }
                 }
 
