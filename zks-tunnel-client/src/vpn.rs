@@ -21,7 +21,6 @@
 mod implementation {
     use futures::{SinkExt, StreamExt};
     use std::net::Ipv4Addr;
-    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Still needed for tunnel stream
@@ -590,6 +589,7 @@ mod implementation {
         }
 
         /// Resolve DNS query via DoH (Cloudflare 1.1.1.1)
+        #[allow(dead_code)]
         async fn resolve_doh(
             client: &Client,
             query: &[u8],

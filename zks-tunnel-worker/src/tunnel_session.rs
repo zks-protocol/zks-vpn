@@ -193,7 +193,7 @@ impl TunnelSession {
             code,
             message: message.to_string(),
         };
-        let _ = ws.send_with_bytes(&error_msg.encode());
+        let _ = ws.send_with_bytes(error_msg.encode());
     }
 
     async fn handle_connect(
@@ -219,7 +219,7 @@ impl TunnelSession {
         }
 
         // For other ports (SSH, database, etc.), use direct connect()
-        let address = format!("{}:{}", host, port);
+        let _address = format!("{}:{}", host, port);
 
         match Socket::builder().connect(host, port) {
             Ok(socket) => {
@@ -234,7 +234,7 @@ impl TunnelSession {
 
                 // Send ConnectSuccess to client
                 let success_msg = TunnelMessage::ConnectSuccess { stream_id };
-                if let Err(e) = ws.send_with_bytes(&success_msg.encode()) {
+                if let Err(_e) = ws.send_with_bytes(success_msg.encode()) {
                     // console_error!("[TunnelSession] Failed to send ConnectSuccess: {:?}", e);
                     return Ok(());
                 }
@@ -279,7 +279,7 @@ impl TunnelSession {
         body: &Bytes,
     ) -> Result<()> {
         // Parse URL
-        let url_parsed = match Url::parse(url) {
+        let _url_parsed = match Url::parse(url) {
             Ok(u) => u,
             Err(e) => {
                 Self::send_error(ws, stream_id, 400, &format!("Invalid URL: {:?}", e));
@@ -301,7 +301,7 @@ impl TunnelSession {
         };
 
         // Parse and set headers
-        let mut req_headers = Headers::new();
+        let req_headers = Headers::new();
         for line in headers.lines() {
             if let Some((key, value)) = line.split_once(':') {
                 let key = key.trim();
@@ -359,7 +359,7 @@ impl TunnelSession {
                     body: body_bytes,
                 };
 
-                if let Err(e) = ws.send_with_bytes(&resp_msg.encode()) {
+                if let Err(_e) = ws.send_with_bytes(resp_msg.encode()) {
                     console_error!("[TunnelSession] Failed to send HttpResponse: {:?}", e);
                 }
             }
@@ -384,7 +384,7 @@ impl TunnelSession {
     ) -> Result<()> {
         // 1. Send ConnectSuccess immediately (we pretend we connected)
         let success_msg = TunnelMessage::ConnectSuccess { stream_id };
-        ws.send_with_bytes(&success_msg.encode())?;
+        ws.send_with_bytes(success_msg.encode())?;
 
         // 2. Create channel to receive data from client (the HTTP request)
         let (write_tx, mut write_rx) = mpsc::channel::<Bytes>(64);
@@ -459,7 +459,7 @@ impl TunnelSession {
 
                 match Fetch::Url(url_parsed).send().await {
                     Ok(mut response) => {
-                        request_sent = true;
+                        // request_sent = true; // Unused assignment as we break below
 
                         // Reconstruct HTTP Response Status Line
                         // worker::Response doesn't always expose status_text, so we use a default
@@ -497,7 +497,7 @@ impl TunnelSession {
                             stream_id,
                             payload: Bytes::from(head),
                         };
-                        let _ = ws_clone.send_with_bytes(&msg.encode());
+                        let _ = ws_clone.send_with_bytes(msg.encode());
 
                         // Stream Body
                         // Use response.stream() to get a Stream<Item = Result<Vec<u8>, Error>>
@@ -510,7 +510,7 @@ impl TunnelSession {
                                             stream_id,
                                             payload: Bytes::from(chunk),
                                         };
-                                        let _ = ws_clone.send_with_bytes(&msg.encode());
+                                        let _ = ws_clone.send_with_bytes(msg.encode());
                                     }
                                     Err(e) => {
                                         console_error!("[TunnelSession] Body read error: {:?}", e);
@@ -522,14 +522,14 @@ impl TunnelSession {
 
                         // Close stream
                         let close_msg = TunnelMessage::Close { stream_id };
-                        let _ = ws_clone.send_with_bytes(&close_msg.encode());
+                        let _ = ws_clone.send_with_bytes(close_msg.encode());
                         active_streams.borrow_mut().remove(&stream_id);
                         break;
                     }
                     Err(e) => {
                         console_error!("[TunnelSession] Fetch failed: {:?}", e);
                         let close_msg = TunnelMessage::Close { stream_id };
-                        let _ = ws_clone.send_with_bytes(&close_msg.encode());
+                        let _ = ws_clone.send_with_bytes(close_msg.encode());
                         active_streams.borrow_mut().remove(&stream_id);
                         break;
                     }
@@ -586,7 +586,7 @@ impl TunnelSession {
                                 stream_id,
                                 payload: Bytes::copy_from_slice(&read_buffer[..n]),
                             };
-                            if ws.send_with_bytes(&msg.encode()).is_err() {
+                            if ws.send_with_bytes(msg.encode()).is_err() {
                                 console_error!("[TunnelSession] Failed to send data to client");
                                 break;
                             }
@@ -602,7 +602,7 @@ impl TunnelSession {
 
         // Cleanup
         let close_msg = TunnelMessage::Close { stream_id };
-        let _ = ws.send_with_bytes(&close_msg.encode());
+        let _ = ws.send_with_bytes(close_msg.encode());
         active_streams.borrow_mut().remove(&stream_id);
 
         // Close the socket
@@ -651,7 +651,7 @@ impl TunnelSession {
                     request_id: query_id as u32,
                     response: Bytes::from(response),
                 };
-                let _ = ws.send_with_bytes(&msg.encode());
+                let _ = ws.send_with_bytes(msg.encode());
             }
             Err(e) => {
                 console_error!("[TunnelSession] DNS failed: {:?}", e);

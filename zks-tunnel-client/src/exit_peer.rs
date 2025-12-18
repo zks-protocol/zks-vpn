@@ -436,8 +436,6 @@ pub async fn run_exit_peer_vpn(
     room_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::io::AsyncReadExt as _;
-    use tokio::io::AsyncWriteExt as _;
 
     info!("╔══════════════════════════════════════════════════════════════╗");
     info!("║      ZKS-VPN Exit Peer VPN Mode - Layer 3 Forwarding         ║");
@@ -500,7 +498,7 @@ pub async fn run_exit_peer_vpn(
     let relay_for_send = relay.clone();
 
     // Task 1: Relay -> TUN (packets from Client to Internet)
-    let relay_to_tun = tokio::spawn(async move {
+    let _relay_to_tun = tokio::spawn(async move {
         while running_clone.load(Ordering::SeqCst) {
             match relay_for_recv.recv().await {
                 Ok(Some(TunnelMessage::IpPacket { payload })) => {
@@ -526,7 +524,7 @@ pub async fn run_exit_peer_vpn(
 
     // Task 2: TUN -> Relay (packets from Internet to Client)
     let running_clone2 = running.clone();
-    let tun_to_relay = tokio::spawn(async move {
+    let _tun_to_relay = tokio::spawn(async move {
         let mut buf = vec![0u8; 2048];
         while running_clone2.load(Ordering::SeqCst) {
             match device_reader.recv(&mut buf).await {

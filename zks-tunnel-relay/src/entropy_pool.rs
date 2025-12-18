@@ -165,7 +165,7 @@ impl DurableObject for EntropyPool {
                                     message: e.to_string(),
                                 }),
                             };
-                            let _ = ws.send_with_str(&response.unwrap_or_default());
+                            let _ = ws.send_with_str(response.unwrap_or_default());
                         }
                     }
                 }
@@ -268,16 +268,13 @@ impl EntropyPool {
         let mut contributions = Vec::new();
 
         // Get keys and iterate - keys() returns iterator of Result<JsValue, _>
-        let keys = map.keys();
-        for key_result in keys {
-            if let Ok(key_js) = key_result {
-                // Convert JsValue to String
-                if let Some(key_str) = key_js.as_string() {
-                    if let Ok(Some(contribution)) =
-                        storage.get::<EntropyContribution>(&key_str).await
-                    {
-                        contributions.push(contribution);
-                    }
+        for key_js in map.keys().flatten() {
+            // Convert JsValue to String
+            if let Some(key_str) = key_js.as_string() {
+                if let Ok(Some(contribution)) =
+                    storage.get::<EntropyContribution>(&key_str).await
+                {
+                    contributions.push(contribution);
                 }
             }
         }

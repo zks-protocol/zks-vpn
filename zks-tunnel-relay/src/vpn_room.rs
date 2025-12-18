@@ -42,8 +42,6 @@ enum ServerEvent {
     PeerJoin { peer_id: String, role: String },
     #[serde(rename = "peer_leave")]
     PeerLeave { peer_id: String, role: String },
-    #[serde(rename = "error")]
-    Error { message: String },
     #[serde(rename = "pong")]
     Pong,
 }
@@ -257,33 +255,12 @@ impl VpnRoom {
             sender.role
         );
 
-        let mut found = false;
-        for ws in self.state.get_websockets() {
-            if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
-                console_log!(
-                    "[VpnRoom] Found peer: {:?} ({})",
-                    session.role,
-                    session.peer_id
-                );
-                if session.role == target_role {
-                    console_log!(
-                        "[VpnRoom] ✅ Forwarding text to {:?} ({})",
-                        session.role,
-                        session.peer_id
-                    );
-                    let _ = ws.send_with_str(text);
-                    found = true;
-                    return;
-                }
-            }
         }
 
-        if !found {
-            console_log!(
-                "[VpnRoom] ❌ No {:?} peer found to forward message!",
-                target_role
-            );
-        }
+        console_log!(
+            "[VpnRoom] ❌ No {:?} peer found to forward message!",
+            target_role
+        );
     }
 
     fn broadcast_text(&self, text: &str, exclude_id: Option<&str>) {

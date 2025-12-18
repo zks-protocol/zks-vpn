@@ -52,6 +52,7 @@ mod implementation {
         /// MTU for the TUN interface
         pub mtu: u16,
         /// Enable DNS leak protection (DoH)
+        #[allow(dead_code)]
         pub dns_protection: bool,
         /// Enable kill switch (block traffic if disconnected)
         pub kill_switch: bool,
@@ -114,10 +115,13 @@ mod implementation {
         relay: Arc<RwLock<Option<Arc<P2PRelay>>>>,
         running: Arc<AtomicBool>,
         stats: Arc<Mutex<P2PVpnStats>>,
+        #[allow(dead_code)]
         http_client: Client,
+        #[allow(dead_code)]
         next_stream_id: Arc<AtomicU32>,
         streams: Arc<RwLock<HashMap<StreamId, StreamState>>>,
         dns_pending: Arc<RwLock<HashMap<u32, SocketAddr>>>,
+        #[allow(clippy::type_complexity)]
         dns_response_tx: Arc<RwLock<Option<mpsc::Sender<(Vec<u8>, SocketAddr)>>>>,
         #[cfg(target_os = "windows")]
         original_fw_policy: Arc<Mutex<Option<String>>>,
@@ -240,6 +244,7 @@ mod implementation {
             relay: Arc<P2PRelay>,
             streams: Arc<RwLock<HashMap<StreamId, StreamState>>>,
             dns_pending: Arc<RwLock<HashMap<u32, SocketAddr>>>,
+            #[allow(clippy::type_complexity)]
             dns_response_tx: Arc<RwLock<Option<mpsc::Sender<(Vec<u8>, SocketAddr)>>>>,
             stats: Arc<Mutex<P2PVpnStats>>,
             running: Arc<AtomicBool>,
@@ -353,11 +358,13 @@ mod implementation {
         }
 
         /// Allocate a new stream ID
+        #[allow(dead_code)]
         fn next_stream_id(&self) -> StreamId {
             self.next_stream_id.fetch_add(1, Ordering::SeqCst)
         }
 
         /// Open a stream through the Exit Peer
+        #[allow(dead_code)]
         async fn open_stream(
             &self,
             host: &str,
@@ -397,6 +404,7 @@ mod implementation {
         }
 
         /// Send data on a stream
+        #[allow(dead_code)]
         async fn send_data(
             &self,
             stream_id: StreamId,
@@ -418,6 +426,7 @@ mod implementation {
         }
 
         /// Close a stream
+        #[allow(dead_code)]
         async fn close_stream(
             &self,
             stream_id: StreamId,
@@ -523,9 +532,8 @@ mod implementation {
                         .output();
 
                     // Route 128.0.0.0/1 (second half of internet) through TUN
-                    let add_route2 = Command::new("route")
+                    let _add_route2 = Command::new("route")
                         .args([
-                            "add",
                             "128.0.0.0",
                             "mask",
                             "128.0.0.0",
@@ -535,7 +543,7 @@ mod implementation {
                         ])
                         .output();
 
-                    match (add_route1, add_route2) {
+                    match (add_route1, _add_route2) {
                         (Ok(r1), Ok(r2)) if r1.status.success() && r2.status.success() => {
                             info!(
                                 "✅ VPN routes added (0.0.0.0/1 + 128.0.0.0/1) via {}",
@@ -585,8 +593,6 @@ mod implementation {
             device: tun_rs::AsyncDevice,
             relay: Arc<P2PRelay>,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
             info!("Starting raw TUN packet forwarding (Layer 3 VPN)...");
             info!("All packets will be ZKS-encrypted end-to-end.");
 
@@ -686,6 +692,7 @@ mod implementation {
         }
 
         /// Run the userspace network stack with P2P relay
+        #[allow(dead_code)]
         async fn run_netstack(
             &self,
             device: tun_rs::AsyncDevice,
@@ -700,7 +707,7 @@ mod implementation {
                 .build()?;
 
             let runner = runner_opt.ok_or("Runner missing")?;
-            let udp_socket = udp_socket_opt.ok_or("UDP socket missing")?;
+            let _udp_socket = udp_socket_opt.ok_or("UDP socket missing")?;
             let tcp_listener = tcp_listener_opt.ok_or("TCP listener missing")?;
 
             // Spawn stack runner
@@ -711,10 +718,10 @@ mod implementation {
             });
 
             let running = self.running.clone();
-            let running_udp = running.clone();
+            let _running_udp = running.clone();
             let stats = self.stats.clone();
             let streams = self.streams.clone();
-            let http_client = self.http_client.clone();
+            let _http_client = self.http_client.clone();
             let dns_protection = self.config.dns_protection;
 
             // Clone self references for the TCP handler
@@ -833,14 +840,14 @@ mod implementation {
 
             // Spawn UDP handler (DNS protection)
             // Create DNS response channel
-            let (dns_tx, mut dns_rx) = mpsc::channel(100);
+            let (_dns_tx, mut _dns_rx) = mpsc::channel(100);
             {
                 let mut tx_guard = self.dns_response_tx.write().await;
                 *tx_guard = Some(dns_tx);
             }
 
             // Spawn UDP handler (DNS protection)
-            let relay_for_udp = relay.clone();
+            let _relay_for_udp = relay.clone();
             let _dns_pending = self.dns_pending.clone();
 
             let udp_task = tokio::spawn(async move {
@@ -1014,11 +1021,13 @@ mod implementation {
         }
 
         /// Get current VPN state
+        #[allow(dead_code)]
         pub async fn state(&self) -> P2PVpnState {
             *self.state.lock().await
         }
 
         /// Get current stats
+        #[allow(dead_code)]
         pub async fn stats(&self) -> P2PVpnStats {
             let s = self.stats.lock().await;
             P2PVpnStats {
