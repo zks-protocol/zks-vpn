@@ -384,12 +384,18 @@ impl P2PRelay {
             tax_payer.start_background_task();
             info!("Started Entropy Tax Payer (contributing randomness to Swarm)");
 
+            // TEMPORARY FIX: Disable remote key fetching because the Relay generates random entropy per request.
+            // This causes Client and Exit Peer to have DIFFERENT keys, breaking decryption.
+            // TODO: Implement "Shared Entropy" protocol where Client fetches and sends key to Exit Peer.
+            /*
             if let Err(e) = keys.fetch_remote_key(vernam_url).await {
                 warn!(
                     "Failed to fetch initial remote key: {}. Proceeding with ChaCha20 base layer.",
                     e
                 );
             }
+            */
+            info!("⚠️  Remote Key fetching disabled (Protocol Mismatch Fix) - Using ChaCha20 Base Layer only");
         }
 
         // Send ack
