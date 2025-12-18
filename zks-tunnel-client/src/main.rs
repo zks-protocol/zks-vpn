@@ -398,6 +398,7 @@ async fn run_p2p_vpn_mode(_args: Args, _room_id: String) -> Result<(), BoxError>
             vernam_url: args.vernam.clone(),
             room_id,
             proxy: args.proxy.clone(),
+            exit_peer_address: std::net::Ipv4Addr::new(10, 0, 85, 2),
         };
 
         info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");
