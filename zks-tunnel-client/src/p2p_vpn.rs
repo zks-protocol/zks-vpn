@@ -506,14 +506,15 @@ mod implementation {
 
                     // Don't delete existing default route - just add VPN route with lower metric
                     // Windows will prefer the route with lower metric
-                    // Add default route via TUN with low metric (overrides existing default)
-                    let tun_ip = format!("{}", self.config.address);
+                    // Route via Exit Peer's VPN IP (10.0.85.2), not our own TUN IP
+                    // This ensures packets go OUT through the TUN device to the Exit Peer
+                    let exit_peer_ip = "10.0.85.2";
                     let add_default = Command::new("route")
-                        .args(["add", "0.0.0.0", "mask", "0.0.0.0", &tun_ip, "metric", "1"])
+                        .args(["add", "0.0.0.0", "mask", "0.0.0.0", exit_peer_ip, "metric", "1"])
                         .output();
                     match add_default {
                         Ok(r) if r.status.success() => {
-                            info!("✅ Default route added via {} (metric 1)", tun_ip);
+                            info!("✅ Default route added via {} (metric 1)", exit_peer_ip);
                         }
                         _ => {
                             warn!(
