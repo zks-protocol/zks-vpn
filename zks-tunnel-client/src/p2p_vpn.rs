@@ -240,13 +240,12 @@ mod implementation {
         }
 
         /// Handle incoming messages from the Exit Peer via Relay
+        #[allow(clippy::type_complexity)]
         async fn handle_relay_messages(
             relay: Arc<P2PRelay>,
             streams: Arc<RwLock<HashMap<StreamId, StreamState>>>,
             dns_pending: Arc<RwLock<HashMap<u32, SocketAddr>>>,
-            #[allow(clippy::type_complexity)] dns_response_tx: Arc<
-                RwLock<Option<mpsc::Sender<(Vec<u8>, SocketAddr)>>>,
-            >,
+            dns_response_tx: Arc<RwLock<Option<mpsc::Sender<(Vec<u8>, SocketAddr)>>>>,
             stats: Arc<Mutex<P2PVpnStats>>,
             running: Arc<AtomicBool>,
         ) {

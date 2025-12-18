@@ -359,7 +359,7 @@ impl TunnelSession {
                     body: body_bytes,
                 };
 
-                if let Err(_e) = ws.send_with_bytes(resp_msg.encode()) {
+                if let Err(e) = ws.send_with_bytes(resp_msg.encode()) {
                     console_error!("[TunnelSession] Failed to send HttpResponse: {:?}", e);
                 }
             }
@@ -399,7 +399,7 @@ impl TunnelSession {
         spawn_local(async move {
             // Buffer to accumulate the initial request headers
             let mut buffer = Vec::new();
-            let mut request_sent = false;
+            let request_sent = false;
 
             // We need to read from write_rx (data from client)
             while let Some(chunk) = write_rx.next().await {

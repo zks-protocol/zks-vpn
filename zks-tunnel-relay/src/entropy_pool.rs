@@ -268,7 +268,7 @@ impl EntropyPool {
         let mut contributions = Vec::new();
 
         // Get keys and iterate - keys() returns iterator of Result<JsValue, _>
-        for key_js in map.keys().flatten() {
+        for key_js in map.keys().into_iter().flatten() {
             // Convert JsValue to String
             if let Some(key_str) = key_js.as_string() {
                 if let Ok(Some(contribution)) = storage.get::<EntropyContribution>(&key_str).await {
