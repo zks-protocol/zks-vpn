@@ -38,6 +38,12 @@ async fn fetch(req: Request, env: Env, _ctx: Context) -> Result<Response> {
             return Response::error("Room ID required", 400);
         }
 
+        console_log!(
+            "[Main] Incoming request to room '{}' from {}",
+            room_id,
+            req.method().to_string()
+        );
+
         // Get or create the Durable Object for this VPN room
         let namespace = env.durable_object("VPN_ROOM")?;
         let id = namespace.id_from_name(room_id)?;
