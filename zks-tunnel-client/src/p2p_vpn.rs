@@ -840,7 +840,7 @@ mod implementation {
 
             // Spawn UDP handler (DNS protection)
             // Create DNS response channel
-            let (_dns_tx, mut _dns_rx) = mpsc::channel(100);
+            let (dns_tx, mut _dns_rx) = mpsc::channel(100);
             {
                 let mut tx_guard = self.dns_response_tx.write().await;
                 *tx_guard = Some(dns_tx);

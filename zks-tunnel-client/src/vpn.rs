@@ -21,6 +21,8 @@
 mod implementation {
     use futures::{SinkExt, StreamExt};
     use std::net::Ipv4Addr;
+    #[cfg(target_os = "windows")]
+    use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt}; // Still needed for tunnel stream
