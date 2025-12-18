@@ -510,7 +510,15 @@ mod implementation {
                     // This ensures packets go OUT through the TUN device to the Exit Peer
                     let exit_peer_ip = "10.0.85.2";
                     let add_default = Command::new("route")
-                        .args(["add", "0.0.0.0", "mask", "0.0.0.0", exit_peer_ip, "metric", "1"])
+                        .args([
+                            "add",
+                            "0.0.0.0",
+                            "mask",
+                            "0.0.0.0",
+                            exit_peer_ip,
+                            "metric",
+                            "1",
+                        ])
                         .output();
                     match add_default {
                         Ok(r) if r.status.success() => {
