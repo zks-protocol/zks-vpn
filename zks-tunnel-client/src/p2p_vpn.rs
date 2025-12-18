@@ -504,46 +504,27 @@ mod implementation {
                         }
                     }
 
-                    // Delete existing default route first to avoid conflicts
                     // Don't delete existing default route - just add VPN route with lower metric
                     // Windows will prefer the route with lower metric
-
-                    // Add split route for 0.0.0.0/1 and 128.0.0.0/1 (covers all IPs without replacing default)
-                    // This is the standard VPN split tunnel approach
+                    // Add default route via TUN with low metric (overrides existing default)
                     let tun_ip = format!("{}", self.config.address);
-
-                    // Route 0.0.0.0/1 (first half of internet) through TUN
-                    let add_route1 = Command::new("route")
+                    let add_default = Command::new("route")
                         .args([
                             "add",
                             "0.0.0.0",
                             "mask",
-                            "128.0.0.0",
+                            "0.0.0.0",
                             &tun_ip,
                             "metric",
                             "1",
                         ])
                         .output();
-
-                    // Route 128.0.0.0/1 (second half of internet) through TUN
-                    let _add_route2 = Command::new("route")
-                        .args(["128.0.0.0", "mask", "128.0.0.0", &tun_ip, "metric", "1"])
-                        .output();
-
-                    match (add_route1, _add_route2) {
-                        (Ok(r1), Ok(r2)) if r1.status.success() && r2.status.success() => {
-                            info!(
-                                "✅ VPN routes added (0.0.0.0/1 + 128.0.0.0/1) via {}",
-                                tun_ip
-                            );
+                    match add_default {
+                        Ok(r) if r.status.success() => {
+                            info!("✅ Default route added via {} (metric 1)", tun_ip);
                         }
                         _ => {
-                            warn!("Split tunnel routes may have failed, trying alternative...");
-                            // Fallback: try adding 0.0.0.0/0 with lower metric
-                            let _ = Command::new("route")
-                                .args(["add", "0.0.0.0", "mask", "0.0.0.0", &tun_ip, "metric", "1"])
-                                .output();
-                            info!("✅ Default route added via {} (fallback)", tun_ip);
+                            warn!("Failed to add default route via TUN. Output: {:?}", add_default);
                         }
                     }
                 }
