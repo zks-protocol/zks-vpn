@@ -91,9 +91,12 @@ struct Args {
     #[arg(long, default_value = "zks0")]
     tun_name: String,
 
-    /// Virtual IP address for VPN (vpn mode only)
     #[arg(long, default_value = "10.0.85.1")]
     vpn_address: String,
+
+    /// Exit Peer VPN IP address (gateway for routing)
+    #[arg(long, default_value = "10.0.85.2")]
+    exit_peer_address: String,
 
     /// Enable kill switch - block traffic if VPN disconnects (vpn mode only)
     #[arg(long)]
@@ -398,7 +401,9 @@ async fn run_p2p_vpn_mode(_args: Args, _room_id: String) -> Result<(), BoxError>
             vernam_url: args.vernam.clone(),
             room_id,
             proxy: args.proxy.clone(),
-            exit_peer_address: std::net::Ipv4Addr::new(10, 0, 85, 2),
+            room_id,
+            proxy: args.proxy.clone(),
+            exit_peer_address: args.exit_peer_address.parse()?,
         };
 
         info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");
