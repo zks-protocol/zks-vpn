@@ -548,7 +548,7 @@ impl P2PRelay {
         running: Arc<std::sync::atomic::AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
         let writer = self.writer.clone();
-        let reader = self.reader.clone();
+        let _reader = self.reader.clone();
         let keys = self.keys.clone();
 
         tokio::spawn(async move {
@@ -595,9 +595,8 @@ impl P2PRelay {
                 let _ = writer_guard.send(Message::Binary(encrypted)).await;
                 drop(writer_guard);
 
-                // Annotate reader with correct type (as requested, though not used in this specific loop)
-                let reader: tokio::sync::MutexGuard<'_, SplitStream<WebSocketStream<BoxedStream>>> = reader.lock().await;
-                drop(reader); // Drop immediately as it's not used here
+                // Reader is captured by move, no need to lock it (would cause deadlock)
+                // let reader = reader.lock().await; // DEADLOCK!
 
                 // Wait for next interval
                 tokio::time::sleep(tokio::time::Duration::from_millis(interval_ms)).await;
