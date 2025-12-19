@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/zks-vpn/zks-go-client/protocol"
 	"github.com/zks-vpn/zks-go-client/relay"
@@ -170,7 +171,7 @@ func (s *Server) handleClient(conn net.Conn) {
 		return
 	}
 
-	// Wait for ConnectSuccess or Error
+	// Wait for ConnectSuccess or Error (with timeout)
 	select {
 	case msg := <-ch:
 		switch m := msg.(type) {
@@ -185,6 +186,10 @@ func (s *Server) handleClient(conn net.Conn) {
 			conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 			return
 		}
+	case <-time.After(30 * time.Second):
+		fmt.Printf("Connect timeout for %s:%d\n", host, port)
+		conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0}) // Host unreachable
+		return
 	}
 
 	// Start bidirectional forwarding
