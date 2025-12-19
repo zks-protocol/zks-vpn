@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use futures::channel::mpsc;
-use futures::{FutureExt, SinkExt, StreamExt};
+use futures::{FutureExt, StreamExt};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
