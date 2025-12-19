@@ -568,6 +568,60 @@ pub async fn run_exit_peer_vpn(
             }
         });
 
+        // Task 2: TUN -> Relay (packets from Internet to Client)
+        let running_clone2 = running.clone();
+        let tun_to_relay = tokio::spawn(async move {
+            let mut buf = vec![0u8; 2048];
+            let batch_size = 64;
+            let mut batch = Vec::with_capacity(batch_size);
+
+            while running_clone2.load(Ordering::SeqCst) {
+                // 1. Read first packet (await)
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_secs(1),
+                    device_reader.recv(&mut buf),
+                )
+                .await
+                {
+                    Ok(Ok(n)) => {
+                        batch.push(Bytes::copy_from_slice(&buf[..n]));
+
+                        // 2. Try to read more packets (opportunistic batching)
+                        for _ in 0..batch_size - 1 {
+                            match tokio::time::timeout(
+                                tokio::time::Duration::from_micros(50),
+                                device_reader.recv(&mut buf),
+                            )
+                            .await
+                            {
+                                Ok(Ok(n)) => {
+                                    batch.push(Bytes::copy_from_slice(&buf[..n]));
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        // 3. Send Batch
+                        if !batch.is_empty() {
+                            debug!("Sending BatchIpPacket: {} packets", batch.len());
+                            let msg = TunnelMessage::BatchIpPacket {
+                                packets: batch.drain(..).collect(),
+                            };
+                            if let Err(e) = relay_for_send.send(&msg).await {
+                                warn!("Failed to send BatchIpPacket to relay: {}", e);
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("TUN read error: {}", e);
+                        break;
+                    }
+                    Err(_) => {}
+                }
+            }
+            info!("Exit Peer TUN reader task stopped");
+        });
+
         info!("✅ Exit Peer VPN mode active - forwarding packets");
         info!("Press Ctrl+C to stop...");
 

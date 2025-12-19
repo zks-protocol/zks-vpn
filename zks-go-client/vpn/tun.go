@@ -10,6 +10,22 @@ import (
 	"github.com/zks-vpn/zks-go-client/protocol"
 	"github.com/zks-vpn/zks-go-client/relay"
 	"golang.zx2c4.com/wireguard/tun"
+)
+
+const (
+	tunInterfaceName = "zks-tun0"
+	tunIP            = "10.0.85.1"
+	tunNetmask       = "255.255.255.0"
+	mtu              = 1420
+	batchSize        = 64 // Read multiple packets at once
+)
+
+// StartTUN creates the TUN device and starts processing packets
+func StartTUN(relayConn *relay.Connection) error {
+	log.Printf("🔌 Creating TUN device: %s", tunInterfaceName)
+
+	// Create TUN device using Wintun
+	dev, err := tun.CreateTUN(tunInterfaceName, MTU)
 	if err != nil {
 		return fmt.Errorf("failed to create TUN device: %v", err)
 	}
