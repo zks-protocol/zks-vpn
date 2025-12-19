@@ -379,10 +379,11 @@ impl P2PRelay {
 
         // Optionally XOR with vernam key for additional security (defense in depth)
         if !vernam_url.is_empty() {
-            // Start Entropy Tax Payer (Background Task)
-            let tax_payer = EntropyTaxPayer::new(vernam_url.to_string());
-            tax_payer.start_background_task();
-            info!("Started Entropy Tax Payer (contributing randomness to Swarm)");
+            // DISABLED: Entropy Tax Payer causes 404 errors (endpoint doesn't exist yet)
+            // TODO: Re-enable once /entropy endpoint is implemented on the relay worker
+            // let tax_payer = EntropyTaxPayer::new(vernam_url.to_string());
+            // tax_payer.start_background_task();
+            // info!("Started Entropy Tax Payer (contributing randomness to Swarm)");
 
             // TEMPORARY FIX: Disable remote key fetching because the Relay generates random entropy per request.
             // This causes Client and Exit Peer to have DIFFERENT keys, breaking decryption.

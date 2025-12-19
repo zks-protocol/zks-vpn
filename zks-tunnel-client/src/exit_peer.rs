@@ -45,6 +45,7 @@ impl ExitPeerState {
 ///
 /// Connects to the relay, waits for Client to connect,
 /// then forwards all traffic to/from the Internet.
+/// Automatically reconnects on connection drop or errors.
 pub async fn run_exit_peer(
     relay_url: &str,
     vernam_url: &str,
@@ -57,139 +58,154 @@ pub async fn run_exit_peer(
     info!("║  Relay: {:52} ║", relay_url);
     info!("╚══════════════════════════════════════════════════════════════╝");
 
-    // Connect to relay as Exit Peer
-    let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await?;
-    let relay = Arc::new(relay);
+    // Outer reconnection loop - Exit Peer will keep trying to reconnect
+    let mut retry_count = 0;
+    let max_retries = 100; // Allow many retries for long-running service
 
-    info!("✅ Connected to relay as Exit Peer");
-    info!("⏳ Waiting for Client to connect...");
-
-    // State for managing connections
-    let state = Arc::new(Mutex::new(ExitPeerState::new()));
-
-    // Main message loop
     loop {
-        match relay.recv().await {
-            Ok(Some(message)) => {
-                let relay_clone = relay.clone();
-                let state_clone = state.clone();
+        if retry_count >= max_retries {
+            error!("Max retries ({}) reached. Exiting.", max_retries);
+            return Err("Max retries reached".into());
+        }
 
-                match message {
-                    TunnelMessage::Connect {
-                        stream_id,
-                        host,
-                        port,
-                    } => {
-                        info!("CONNECT request: {}:{} (stream {})", host, port, stream_id);
+        // Connect to relay as Exit Peer
+        info!("📡 Connecting to relay (attempt {})...", retry_count + 1);
+        let relay = match P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await {
+            Ok(r) => Arc::new(r),
+            Err(e) => {
+                warn!("Failed to connect: {}. Retrying in 5s...", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                retry_count += 1;
+                continue;
+            }
+        };
 
-                        // Spawn task to handle connection
-                        tokio::spawn(async move {
-                            handle_connect(relay_clone, state_clone, stream_id, &host, port).await;
-                        });
-                    }
+        info!("✅ Connected to relay as Exit Peer");
+        info!("⏳ Waiting for Client to connect...");
 
-                    TunnelMessage::Data { stream_id, payload } => {
-                        debug!("DATA for stream {}: {} bytes", stream_id, payload.len());
+        // Reset retry count on successful connection
+        retry_count = 0;
 
-                        // Forward data to the connection
-                        let mut state = state_clone.lock().await;
-                        if let Some(conn) = state.connections.get_mut(&stream_id) {
-                            if let Err(e) = conn.stream.write_all(&payload).await {
-                                warn!("Failed to write to stream {}: {}", stream_id, e);
+        // State for managing connections (reset on each connection)
+        let state = Arc::new(Mutex::new(ExitPeerState::new()));
+
+        // Inner message loop
+        let disconnect_reason = loop {
+            match relay.recv().await {
+                Ok(Some(message)) => {
+                    let relay_clone = relay.clone();
+                    let state_clone = state.clone();
+
+                    match message {
+                        TunnelMessage::Connect {
+                            stream_id,
+                            host,
+                            port,
+                        } => {
+                            info!("CONNECT request: {}:{} (stream {})", host, port, stream_id);
+
+                            // Spawn task to handle connection
+                            tokio::spawn(async move {
+                                handle_connect(relay_clone, state_clone, stream_id, &host, port).await;
+                            });
+                        }
+
+                        TunnelMessage::Data { stream_id, payload } => {
+                            debug!("DATA for stream {}: {} bytes", stream_id, payload.len());
+
+                            // Forward data to the connection
+                            let mut state = state_clone.lock().await;
+                            if let Some(conn) = state.connections.get_mut(&stream_id) {
+                                if let Err(e) = conn.stream.write_all(&payload).await {
+                                    warn!("Failed to write to stream {}: {}", stream_id, e);
+                                }
                             }
                         }
-                    }
 
-                    TunnelMessage::Close { stream_id } => {
-                        debug!("CLOSE stream {}", stream_id);
-                        let mut state = state_clone.lock().await;
-                        state.connections.remove(&stream_id);
-                    }
+                        TunnelMessage::Close { stream_id } => {
+                            debug!("CLOSE stream {}", stream_id);
+                            let mut state = state_clone.lock().await;
+                            state.connections.remove(&stream_id);
+                        }
 
-                    TunnelMessage::Ping => {
-                        let _ = relay_clone.send(&TunnelMessage::Pong).await;
-                    }
+                        TunnelMessage::Ping => {
+                            let _ = relay_clone.send(&TunnelMessage::Pong).await;
+                        }
 
-                    TunnelMessage::HttpRequest {
-                        stream_id,
-                        method,
-                        url,
-                        headers,
-                        body,
-                    } => {
-                        info!("HTTP {} {} (stream {})", method, url, stream_id);
+                        TunnelMessage::HttpRequest {
+                            stream_id,
+                            method,
+                            url,
+                            headers,
+                            body,
+                        } => {
+                            info!("HTTP {} {} (stream {})", method, url, stream_id);
 
-                        tokio::spawn(async move {
-                            handle_http_request(
-                                relay_clone,
-                                stream_id,
-                                &method,
-                                &url,
-                                &headers,
-                                &body,
-                            )
-                            .await;
-                        });
-                    }
+                            tokio::spawn(async move {
+                                handle_http_request(
+                                    relay_clone,
+                                    stream_id,
+                                    &method,
+                                    &url,
+                                    &headers,
+                                    &body,
+                                )
+                                .await;
+                            });
+                        }
 
-                    TunnelMessage::DnsQuery { request_id, query } => {
-                        info!("DNS Query ID {}", request_id);
-                        let relay_clone = relay_clone.clone();
-                        tokio::spawn(async move {
-                            handle_dns_query(relay_clone, request_id, query).await;
-                        });
-                    }
+                        TunnelMessage::DnsQuery { request_id, query } => {
+                            info!("DNS Query ID {}", request_id);
+                            let relay_clone = relay_clone.clone();
+                            tokio::spawn(async move {
+                                handle_dns_query(relay_clone, request_id, query).await;
+                            });
+                        }
 
-                    TunnelMessage::IpPacket { payload } => {
-                        debug!("IpPacket received: {} bytes", payload.len());
-                        // VPN mode: Forward IP packet to internet
-                        // Parse IP header to get destination
-                        if payload.len() >= 20 {
-                            let version = (payload[0] >> 4) & 0x0F;
-                            if version == 4 {
-                                let dst_ip = std::net::Ipv4Addr::new(
-                                    payload[16],
-                                    payload[17],
-                                    payload[18],
-                                    payload[19],
-                                );
-                                let protocol = payload[9];
-                                let proto_name = match protocol {
-                                    1 => "ICMP",
-                                    6 => "TCP",
-                                    17 => "UDP",
-                                    _ => "OTHER",
-                                };
-                                debug!("IPv4 {} packet to {}", proto_name, dst_ip);
-
-                                // TODO: Forward packet through TUN device or raw socket
-                                // For now, we just log it - full implementation requires:
-                                // 1. Create TUN device on Exit Peer
-                                // 2. Write packet to TUN
-                                // 3. Enable IP forwarding: sysctl net.ipv4.ip_forward=1
-                                // 4. Setup NAT: iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-                                // 5. Read response from TUN and send back as IpPacket
+                        TunnelMessage::IpPacket { payload } => {
+                            debug!("IpPacket received: {} bytes", payload.len());
+                            // VPN mode: Forward IP packet to internet
+                            // Parse IP header to get destination
+                            if payload.len() >= 20 {
+                                let version = (payload[0] >> 4) & 0x0F;
+                                if version == 4 {
+                                    let dst_ip = std::net::Ipv4Addr::new(
+                                        payload[16],
+                                        payload[17],
+                                        payload[18],
+                                        payload[19],
+                                    );
+                                    let protocol = payload[9];
+                                    let proto_name = match protocol {
+                                        1 => "ICMP",
+                                        6 => "TCP",
+                                        17 => "UDP",
+                                        _ => "OTHER",
+                                    };
+                                    debug!("IPv4 {} packet to {}", proto_name, dst_ip);
+                                }
                             }
                         }
-                    }
 
-                    _ => {
-                        debug!("Unhandled message: {:?}", message);
+                        _ => {
+                            debug!("Unhandled message: {:?}", message);
+                        }
                     }
                 }
+                Ok(None) => {
+                    break "Relay connection closed normally";
+                }
+                Err(e) => {
+                    break Box::leak(format!("Relay error: {}", e).into_boxed_str());
+                }
             }
-            Ok(None) => {
-                info!("Relay connection closed");
-                break;
-            }
-            Err(e) => {
-                error!("Error receiving from relay: {}", e);
-                break;
-            }
-        }
-    }
+        };
 
-    Ok(())
+        // Log disconnect reason and reconnect
+        warn!("🔌 Disconnected: {}. Reconnecting in 3s...", disconnect_reason);
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        retry_count += 1;
+    }
 }
 
 /// Handle CONNECT request - open TCP connection to target

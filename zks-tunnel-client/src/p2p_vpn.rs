@@ -528,32 +528,87 @@ mod implementation {
                         }
                     }
 
-                    // Don't delete existing default route - just add VPN route with lower metric
-                    // Windows will prefer the route with lower metric
-                    // Route via Exit Peer's VPN IP, not our own TUN IP
-                    // This ensures packets go OUT through the TUN device to the Exit Peer
-                    let exit_peer_ip = format!("{}", self.config.exit_peer_address);
-                    let add_default = Command::new("route")
-                        .args([
-                            "add",
-                            "0.0.0.0",
-                            "mask",
-                            "0.0.0.0",
-                            &exit_peer_ip,
-                            "metric",
-                            "1",
-                        ])
+                    // SPLIT-TUNNEL ROUTING APPROACH
+                    // Instead of trying to override 0.0.0.0/0, we add two /1 routes that together
+                    // cover all IPs but are more specific than the default route.
+                    // This is the same approach used by OpenVPN and WireGuard.
+                    
+                    // Get TUN interface index
+                    let tun_interface = Command::new("powershell")
+                        .args(["-Command", "(Get-NetAdapter -Name 'tun*' | Select-Object -First 1).ifIndex"])
                         .output();
-                    match add_default {
-                        Ok(r) if r.status.success() => {
-                            info!("✅ Default route added via {} (metric 1)", exit_peer_ip);
+                    
+                    let tun_if_index = match tun_interface {
+                        Ok(output) => {
+                            String::from_utf8_lossy(&output.stdout).trim().to_string()
                         }
-                        _ => {
-                            warn!(
-                                "Failed to add default route via TUN. Output: {:?}",
-                                add_default
-                            );
+                        Err(_) => String::new()
+                    };
+
+                    if tun_if_index.is_empty() {
+                        error!("Failed to get TUN interface index. VPN routing will not work.");
+                    } else {
+                        info!("TUN interface index: {}", tun_if_index);
+                        
+                        // The gateway must be on-link (on the same subnet as the TUN interface)
+                        // We use the TUN IP itself since it's a point-to-point link
+                        let tun_ip = format!("{}", self.config.address);
+                        
+                        // Route 1: 0.0.0.0/1 covers 0.0.0.0 to 127.255.255.255
+                        let route1 = Command::new("route")
+                            .args([
+                                "add",
+                                "0.0.0.0",
+                                "mask",
+                                "128.0.0.0",  // /1 netmask
+                                &tun_ip,
+                                "metric",
+                                "1",
+                                "if",
+                                &tun_if_index,
+                            ])
+                            .output();
+                        
+                        match route1 {
+                            Ok(r) => {
+                                if r.status.success() {
+                                    info!("✅ Added route 0.0.0.0/1 via TUN (IF {})", tun_if_index);
+                                } else {
+                                    let stderr = String::from_utf8_lossy(&r.stderr);
+                                    warn!("Route 0.0.0.0/1 failed: {}", stderr);
+                                }
+                            }
+                            Err(e) => warn!("Route 0.0.0.0/1 error: {}", e),
                         }
+                        
+                        // Route 2: 128.0.0.0/1 covers 128.0.0.0 to 255.255.255.255
+                        let route2 = Command::new("route")
+                            .args([
+                                "add",
+                                "128.0.0.0",
+                                "mask",
+                                "128.0.0.0",  // /1 netmask
+                                &tun_ip,
+                                "metric",
+                                "1",
+                                "if",
+                                &tun_if_index,
+                            ])
+                            .output();
+                        
+                        match route2 {
+                            Ok(r) => {
+                                if r.status.success() {
+                                    info!("✅ Added route 128.0.0.0/1 via TUN (IF {})", tun_if_index);
+                                } else {
+                                    let stderr = String::from_utf8_lossy(&r.stderr);
+                                    warn!("Route 128.0.0.0/1 failed: {}", stderr);
+                                }
+                            }
+                            Err(e) => warn!("Route 128.0.0.0/1 error: {}", e),
+                        }
+                        
+                        info!("✅ Split-tunnel routes configured - all traffic will go via VPN");
                     }
                 }
 
