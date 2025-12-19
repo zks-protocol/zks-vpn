@@ -18,7 +18,6 @@ use zks_tunnel_proto::{StreamId, TunnelMessage};
 
 use crate::p2p_relay::{P2PRelay, PeerRole};
 
-
 /// Active TCP connection managed by Exit Peer
 #[cfg(feature = "socks5")]
 struct ActiveConnection {
