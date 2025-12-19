@@ -532,35 +532,36 @@ mod implementation {
                     // Instead of trying to override 0.0.0.0/0, we add two /1 routes that together
                     // cover all IPs but are more specific than the default route.
                     // This is the same approach used by OpenVPN and WireGuard.
-                    
+
                     // Get TUN interface index
                     let tun_interface = Command::new("powershell")
-                        .args(["-Command", "(Get-NetAdapter -Name 'tun*' | Select-Object -First 1).ifIndex"])
+                        .args([
+                            "-Command",
+                            "(Get-NetAdapter -Name 'tun*' | Select-Object -First 1).ifIndex",
+                        ])
                         .output();
-                    
+
                     let tun_if_index = match tun_interface {
-                        Ok(output) => {
-                            String::from_utf8_lossy(&output.stdout).trim().to_string()
-                        }
-                        Err(_) => String::new()
+                        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                        Err(_) => String::new(),
                     };
 
                     if tun_if_index.is_empty() {
                         error!("Failed to get TUN interface index. VPN routing will not work.");
                     } else {
                         info!("TUN interface index: {}", tun_if_index);
-                        
+
                         // The gateway must be on-link (on the same subnet as the TUN interface)
                         // We use the TUN IP itself since it's a point-to-point link
                         let tun_ip = format!("{}", self.config.address);
-                        
+
                         // Route 1: 0.0.0.0/1 covers 0.0.0.0 to 127.255.255.255
                         let route1 = Command::new("route")
                             .args([
                                 "add",
                                 "0.0.0.0",
                                 "mask",
-                                "128.0.0.0",  // /1 netmask
+                                "128.0.0.0", // /1 netmask
                                 &tun_ip,
                                 "metric",
                                 "1",
@@ -568,7 +569,7 @@ mod implementation {
                                 &tun_if_index,
                             ])
                             .output();
-                        
+
                         match route1 {
                             Ok(r) => {
                                 if r.status.success() {
@@ -580,14 +581,14 @@ mod implementation {
                             }
                             Err(e) => warn!("Route 0.0.0.0/1 error: {}", e),
                         }
-                        
+
                         // Route 2: 128.0.0.0/1 covers 128.0.0.0 to 255.255.255.255
                         let route2 = Command::new("route")
                             .args([
                                 "add",
                                 "128.0.0.0",
                                 "mask",
-                                "128.0.0.0",  // /1 netmask
+                                "128.0.0.0", // /1 netmask
                                 &tun_ip,
                                 "metric",
                                 "1",
@@ -595,11 +596,14 @@ mod implementation {
                                 &tun_if_index,
                             ])
                             .output();
-                        
+
                         match route2 {
                             Ok(r) => {
                                 if r.status.success() {
-                                    info!("✅ Added route 128.0.0.0/1 via TUN (IF {})", tun_if_index);
+                                    info!(
+                                        "✅ Added route 128.0.0.0/1 via TUN (IF {})",
+                                        tun_if_index
+                                    );
                                 } else {
                                     let stderr = String::from_utf8_lossy(&r.stderr);
                                     warn!("Route 128.0.0.0/1 failed: {}", stderr);
@@ -607,7 +611,7 @@ mod implementation {
                             }
                             Err(e) => warn!("Route 128.0.0.0/1 error: {}", e),
                         }
-                        
+
                         info!("✅ Split-tunnel routes configured - all traffic will go via VPN");
                     }
                 }

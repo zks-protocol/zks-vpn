@@ -70,15 +70,17 @@ pub async fn run_exit_peer(
 
         // Connect to relay as Exit Peer
         info!("📡 Connecting to relay (attempt {})...", retry_count + 1);
-        let relay = match P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await {
-            Ok(r) => Arc::new(r),
-            Err(e) => {
-                warn!("Failed to connect: {}. Retrying in 5s...", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                retry_count += 1;
-                continue;
-            }
-        };
+        let relay =
+            match P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await
+            {
+                Ok(r) => Arc::new(r),
+                Err(e) => {
+                    warn!("Failed to connect: {}. Retrying in 5s...", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    retry_count += 1;
+                    continue;
+                }
+            };
 
         info!("✅ Connected to relay as Exit Peer");
         info!("⏳ Waiting for Client to connect...");
@@ -106,7 +108,8 @@ pub async fn run_exit_peer(
 
                             // Spawn task to handle connection
                             tokio::spawn(async move {
-                                handle_connect(relay_clone, state_clone, stream_id, &host, port).await;
+                                handle_connect(relay_clone, state_clone, stream_id, &host, port)
+                                    .await;
                             });
                         }
 
@@ -202,7 +205,10 @@ pub async fn run_exit_peer(
         };
 
         // Log disconnect reason and reconnect
-        warn!("🔌 Disconnected: {}. Reconnecting in 3s...", disconnect_reason);
+        warn!(
+            "🔌 Disconnected: {}. Reconnecting in 3s...",
+            disconnect_reason
+        );
         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
         retry_count += 1;
     }
