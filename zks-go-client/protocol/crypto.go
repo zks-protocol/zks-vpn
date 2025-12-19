@@ -95,6 +95,74 @@ func (w *WasifVernam) Decrypt(data []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
+// EncryptTo encrypts plaintext into dst using ChaCha20-Poly1305.
+// dst must have enough capacity to hold the result (len(plaintext) + 12 + 16).
+// Returns the slice of dst containing the encrypted data.
+func (w *WasifVernam) EncryptTo(dst, plaintext []byte) ([]byte, error) {
+	// Generate nonce: 4 bytes random + 8 bytes counter (big-endian)
+	// We write nonce directly to dst[:12]
+	if len(dst) < 12+len(plaintext)+16 {
+		return nil, errors.New("destination buffer too small")
+	}
+
+	nonce := dst[:12]
+	if _, err := io.ReadFull(rand.Reader, nonce[:4]); err != nil {
+		return nil, err
+	}
+	counter := atomic.AddUint64(&w.nonceCounter, 1) - 1
+	binary.BigEndian.PutUint64(nonce[4:], counter)
+
+	// Optional: XOR plaintext with remote key (currently disabled)
+	// For zero-copy, we handle this carefully. If we had XOR, we'd need to
+	// XOR into a temporary buffer or directly into dst if we support in-place.
+	// Since it's disabled, we just use plaintext.
+	data := plaintext
+	if len(w.remoteKey) > 0 {
+		// XOR logic would go here, potentially needing a copy if not in-place
+		// For now, keeping it simple as it's disabled
+		data = make([]byte, len(plaintext))
+		copy(data, plaintext)
+		for i := range data {
+			data[i] ^= w.remoteKey[i%len(w.remoteKey)]
+		}
+	}
+
+	// Encrypt with ChaCha20-Poly1305
+	// Seal appends to dst[:12], so we pass dst[:12] as the "out" slice
+	// The result will be dst[:12+len(ciphertext)+tag]
+	ciphertext := w.cipher.Seal(dst[:12], nonce, data, nil)
+
+	return ciphertext, nil
+}
+
+// DecryptTo decrypts data into dst using ChaCha20-Poly1305.
+// dst must have enough capacity to hold the plaintext.
+// Returns the slice of dst containing the decrypted data.
+func (w *WasifVernam) DecryptTo(dst, data []byte) ([]byte, error) {
+	if len(data) < 12+16 {
+		return nil, errors.New("ciphertext too short")
+	}
+
+	nonce := data[:12]
+	ciphertext := data[12:]
+
+	// Decrypt with ChaCha20-Poly1305
+	// Open appends to dst[:0]
+	plaintext, err := w.cipher.Open(dst[:0], nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Optional: XOR with remote key to recover original (currently disabled)
+	if len(w.remoteKey) > 0 {
+		for i := range plaintext {
+			plaintext[i] ^= w.remoteKey[i%len(w.remoteKey)]
+		}
+	}
+
+	return plaintext, nil
+}
+
 // KeyExchange handles X25519 key exchange
 type KeyExchange struct {
 	privateKey [32]byte

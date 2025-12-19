@@ -1,0 +1,64 @@
+name: ZKS VPN Exit Peer (High Speed Test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      room_id:
+        description: 'VPN Room ID'
+        required: true
+        default: 'vpn-gh-action-test'
+
+jobs:
+  run-exit-peer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Max 6 hours
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y iproute2 iptables
+
+    - name: Configure Network (NAT & TUN)
+      run: |
+        # Enable IP Forwarding
+        sudo sysctl -w net.ipv4.ip_forward=1
+        
+        # Disable Reverse Path Filtering (CRITICAL)
+        sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+        sudo sysctl -w net.ipv4.conf.default.rp_filter=0
+        
+        # Create TUN device (optional, app does it, but good to ensure module loaded)
+        sudo mkdir -p /dev/net
+        sudo mknod /dev/net/tun c 10 200 || true
+        sudo chmod 666 /dev/net/tun
+
+        # Configure NAT (Masquerade outbound traffic on eth0)
+        # GitHub Actions interface is usually eth0 or ens4
+        IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
+        echo "Detected Interface: $IFACE"
+        
+        sudo iptables -t nat -A POSTROUTING -s 10.0.85.0/24 -o $IFACE -j MASQUERADE
+        sudo iptables -I FORWARD 1 -i tun+ -j ACCEPT
+        sudo iptables -I FORWARD 1 -o tun+ -j ACCEPT
+
+    - name: Build Exit Peer
+      run: |
+        cd zks-tunnel-client
+        cargo build --release --features vpn
+
+    - name: Run Exit Peer
+      env:
+        RUST_LOG: info
+      run: |
+        cd zks-tunnel-client
+        # Run with sudo to create TUN device
+        sudo -E ./target/release/zks-vpn --mode exit-peer --room ${{ inputs.room_id }}

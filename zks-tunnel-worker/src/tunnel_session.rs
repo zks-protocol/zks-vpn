@@ -239,8 +239,8 @@ impl TunnelSession {
                     return Ok(());
                 }
 
-                // Create channel for write requests (bounded to prevent memory issues)
-                let (write_tx, write_rx) = mpsc::channel::<Bytes>(64);
+                // Create channel for write requests (increased capacity for high throughput)
+                let (write_tx, write_rx) = mpsc::channel::<Bytes>(256);
 
                 // Store the write sender in active streams
                 self.active_streams
@@ -622,18 +622,33 @@ impl TunnelSession {
         };
 
         if let Some(mut write_tx) = write_tx_opt {
-            // Send data to the socket task via channel
-            if write_tx
-                .send(Bytes::copy_from_slice(payload))
-                .await
-                .is_err()
-            {
-                // Channel closed, clean up
-                self.active_streams.borrow_mut().remove(&stream_id);
-                console_error!(
-                    "[TunnelSession] Write channel closed for stream {}",
-                    stream_id
-                );
+            // Use try_send (non-blocking) to prevent one slow stream from blocking the entire DO.
+            // This is the "Drop on Full" strategy - standard for VPN/real-time traffic.
+            match write_tx.try_send(Bytes::copy_from_slice(payload)) {
+                Ok(()) => {
+                    // Successfully queued
+                }
+                Err(e) if e.is_full() => {
+                    // Channel full - drop packet instead of blocking
+                    // This prevents "Death Spiral" where one slow client freezes everyone
+                    console_warn!(
+                        "[TunnelSession] Dropping packet for stream {} (buffer full, {} bytes dropped)",
+                        stream_id,
+                        payload.len()
+                    );
+                }
+                Err(e) if e.is_disconnected() => {
+                    // Channel closed, clean up
+                    self.active_streams.borrow_mut().remove(&stream_id);
+                    console_error!(
+                        "[TunnelSession] Write channel closed for stream {}",
+                        stream_id
+                    );
+                }
+                Err(_) => {
+                    // Unexpected error
+                    self.active_streams.borrow_mut().remove(&stream_id);
+                }
             }
         } else {
             console_warn!("[TunnelSession] Data for unknown stream {}", stream_id);

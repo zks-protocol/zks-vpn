@@ -152,6 +152,20 @@ func (m *IpPacket) Encode() []byte {
 	return buf
 }
 
+// EncodeTo encodes the IpPacket into dst.
+// dst must have enough capacity (1 + 4 + len(Payload)).
+// Returns the number of bytes written.
+func (m *IpPacket) EncodeTo(dst []byte) int {
+	needed := 1 + 4 + len(m.Payload)
+	if len(dst) < needed {
+		return 0
+	}
+	dst[0] = CmdIpPacket
+	binary.BigEndian.PutUint32(dst[1:5], uint32(len(m.Payload)))
+	copy(dst[5:], m.Payload)
+	return needed
+}
+
 // Decode parses a binary message into a TunnelMessage
 func Decode(data []byte) (TunnelMessage, error) {
 	if len(data) < 1 {

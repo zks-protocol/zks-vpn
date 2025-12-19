@@ -344,6 +344,14 @@ impl P2PRelay {
                         // Check if it's a key exchange message
                         if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
                             if let Some(pk_bytes) = ke_msg.parse_public_key() {
+                                // RACE CONDITION FIX:
+                                // Always send our public key when we receive the peer's key.
+                                // This ensures that if we missed the 'peer_join' event (or if the peer
+                                // sent their key before we processed the join), the peer still gets our key.
+                                debug!("Received peer key, sending ours to ensure they have it");
+                                let pk_msg = KeyExchangeMessage::new_public_key(&our_pk);
+                                writer.send(Message::Text(pk_msg.to_json())).await?;
+
                                 return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(pk_bytes);
                             }
                         }

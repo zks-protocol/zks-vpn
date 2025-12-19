@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/zks-vpn/zks-go-client/relay"
 	"github.com/zks-vpn/zks-go-client/socks5"
+	"github.com/zks-vpn/zks-go-client/vpn"
 )
 
 const (
@@ -19,6 +21,11 @@ const (
 )
 
 func main() {
+	// Optimization: Set GOGC=200 to reduce GC frequency
+	// This trades slightly more memory usage for significantly less CPU usage
+	// and higher throughput, which is critical for a VPN client.
+	debug.SetGCPercent(200)
+
 	// CLI flags
 	mode := flag.String("mode", "p2p-client", "Mode: p2p-client (SOCKS5), p2p-vpn (TUN), exit-peer")
 	room := flag.String("room", "", "Room ID for P2P connection")
@@ -92,10 +99,22 @@ func runP2PVPN(relayURL, roomID string) {
 	fmt.Println("\n🔒 Starting P2P VPN (System-Wide TUN Mode)...")
 	fmt.Println("⚠️  VPN mode requires Administrator privileges")
 
-	// TODO: Implement TUN mode using WireGuard's wintun
-	fmt.Println("❌ VPN mode not yet implemented in Go client")
-	fmt.Println("   Use --mode p2p-client for SOCKS5 proxy mode")
-	os.Exit(1)
+	// 1. Connect to Relay
+	fmt.Printf("🔌 Connecting to relay: %s/room/%s?role=client\n", relayURL, roomID)
+	conn, err := relay.Connect(relayURL, roomID, relay.RoleClient)
+	if err != nil {
+		fmt.Printf("❌ Failed to connect: %v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+
+	fmt.Println("✅ Connected to Exit Peer via ZKS relay")
+
+	// 2. Start TUN Device & VPN Logic
+	if err := vpn.StartTUN(conn); err != nil {
+		fmt.Printf("❌ VPN error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runExitPeer(relayURL, roomID string) {

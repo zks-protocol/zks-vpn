@@ -176,20 +176,22 @@ async fn main() -> Result<(), BoxError> {
             });
             return run_p2p_vpn_mode(args, room_id).await;
         }
-        Mode::ExitPeer => {
+        Mode::ExitPeer | Mode::ExitPeerVpn => {
             let room_id = args.room.clone().unwrap_or_else(|| {
                 error!("Room ID required for Exit Peer mode. Use --room <id>");
                 std::process::exit(1);
             });
-            return exit_peer::run_exit_peer(&args.relay, &args.vernam, &room_id).await;
-        }
-        #[cfg(feature = "vpn")]
-        Mode::ExitPeerVpn => {
-            let room_id = args.room.clone().unwrap_or_else(|| {
-                error!("Room ID required for Exit Peer VPN mode. Use --room <id>");
-                std::process::exit(1);
-            });
-            return exit_peer::run_exit_peer_vpn(&args.relay, &args.vernam, &room_id).await;
+            // Use VPN mode (with TUN device) when vpn feature is enabled
+            #[cfg(feature = "vpn")]
+            {
+                info!("Running Exit Peer in VPN mode (TUN device enabled)");
+                return exit_peer::run_exit_peer_vpn(&args.relay, &args.vernam, &room_id).await;
+            }
+            #[cfg(not(feature = "vpn"))]
+            {
+                info!("Running Exit Peer in SOCKS5/HTTP mode (no TUN device)");
+                return exit_peer::run_exit_peer(&args.relay, &args.vernam, &room_id).await;
+            }
         }
         _ => {}
     }
