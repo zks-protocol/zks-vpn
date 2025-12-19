@@ -124,6 +124,7 @@ impl WasifVernam {
     }
 
     /// Fetch remote key from zks-vernam worker
+    #[allow(dead_code)]
     pub async fn fetch_remote_key(
         &mut self,
         vernam_url: &str,
@@ -158,10 +159,13 @@ impl WasifVernam {
 }
 
 /// Entropy Tax Payer: Contributes randomness to the Swarm
+/// NOTE: Currently disabled until /entropy endpoint is implemented
+#[allow(dead_code)]
 pub struct EntropyTaxPayer {
     vernam_url: String,
 }
 
+#[allow(dead_code)]
 impl EntropyTaxPayer {
     pub fn new(vernam_url: String) -> Self {
         Self { vernam_url }
@@ -375,7 +379,7 @@ impl P2PRelay {
         if encryption_key.len() >= 32 {
             shared_secret.copy_from_slice(&encryption_key[0..32]);
         }
-        let mut keys = WasifVernam::new(shared_secret);
+        let keys = WasifVernam::new(shared_secret);
 
         // Optionally XOR with vernam key for additional security (defense in depth)
         if !vernam_url.is_empty() {
