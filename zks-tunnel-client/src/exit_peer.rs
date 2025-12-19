@@ -604,12 +604,13 @@ pub async fn run_exit_peer_vpn(
                         // 3. Send Batch
                         if !batch.is_empty() {
                             debug!("Sending BatchIpPacket: {} packets", batch.len());
-                            let msg = TunnelMessage::BatchIpPacket {
-                                packets: batch.drain(..).collect(),
-                            };
+                            let packets = std::mem::take(&mut batch);
+                            let msg = TunnelMessage::BatchIpPacket { packets };
                             if let Err(e) = relay_for_send.send(&msg).await {
                                 warn!("Failed to send BatchIpPacket to relay: {}", e);
                             }
+                            // Re-allocate capacity for next batch since take() left it empty
+                            batch.reserve(batch_size);
                         }
                     }
                     Ok(Err(e)) => {

@@ -25,7 +25,7 @@ func StartTUN(relayConn *relay.Connection) error {
 	log.Printf("🔌 Creating TUN device: %s", tunInterfaceName)
 
 	// Create TUN device using Wintun
-	dev, err := tun.CreateTUN(tunInterfaceName, MTU)
+	dev, err := tun.CreateTUN(tunInterfaceName, mtu)
 	if err != nil {
 		return fmt.Errorf("failed to create TUN device: %v", err)
 	}
