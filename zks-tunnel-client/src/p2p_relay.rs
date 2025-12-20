@@ -423,31 +423,22 @@ impl P2PRelay {
                 PeerRole::ExitPeer => {
                     // Exit Peer: Wait for SharedEntropy from Client
                     info!("⏳ Waiting for Swarm Entropy from Client...");
-                    let entropy_timeout =
-                        tokio::time::timeout(Duration::from_secs(10), async {
-                            while let Some(msg) = reader.next().await {
-                                match msg? {
-                                    Message::Text(text) => {
-                                        if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                                            if let Some(entropy_bytes) =
-                                                ke_msg.parse_shared_entropy()
-                                            {
-                                                return Ok::<
-                                                    _,
-                                                    Box<dyn std::error::Error + Send + Sync>,
-                                                >(
-                                                    entropy_bytes
-                                                );
-                                            }
-                                        }
-                                        // Ignore other messages (acks, etc.)
+                    let entropy_timeout = tokio::time::timeout(Duration::from_secs(10), async {
+                        while let Some(msg) = reader.next().await {
+                            if let Message::Text(text) = msg? {
+                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                                    if let Some(entropy_bytes) = ke_msg.parse_shared_entropy() {
+                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                                            entropy_bytes,
+                                        );
                                     }
-                                    _ => {}
                                 }
+                                // Ignore other messages (acks, etc.)
                             }
-                            Err("No entropy received".into())
-                        })
-                        .await;
+                        }
+                        Err("No entropy received".into())
+                    })
+                    .await;
 
                     match entropy_timeout {
                         Ok(Ok(entropy_bytes)) => {
