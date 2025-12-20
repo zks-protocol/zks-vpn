@@ -5,9 +5,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 
 	"github.com/zks-vpn/zks-go-client/relay"
@@ -95,11 +99,58 @@ func runP2PClient(relayURL, roomID, listenAddr string) {
 	}
 }
 
+// addRelayBypassRoutes adds bypass routes for relay server IPs before TUN creation
+// This prevents routing loop where relay traffic gets sent to TUN device
+func addRelayBypassRoutes(relayURL string) error {
+	// Parse relay URL to get hostname
+	u, err := url.Parse(relayURL)
+	if err != nil {
+		return fmt.Errorf("invalid relay URL: %w", err)
+	}
+
+	// Resolve relay IPs
+	ips, err := net.LookupHost(u.Hostname())
+	if err != nil {
+		return fmt.Errorf("failed to resolve relay: %w", err)
+	}
+
+	// Get default gateway
+	cmd := exec.Command("powershell", "-Command",
+		"Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -ExpandProperty NextHop -First 1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to get gateway: %w", err)
+	}
+	gateway := strings.TrimSpace(string(out))
+
+	// Add bypass route for each relay IP
+	for _, ip := range ips {
+		if !strings.Contains(ip, ".") { // IPv4 only
+			continue
+		}
+		fmt.Printf("🔓 Adding relay bypass: %s -> %s\n", ip, gateway)
+		cmd = exec.Command("route", "add", ip, "mask", "255.255.255.255", gateway, "metric", "1")
+		if _, err := cmd.CombinedOutput(); err != nil {
+			// Non-fatal: route may already exist
+			fmt.Printf("   (route may already exist)\n")
+		}
+	}
+
+	return nil
+}
+
 func runP2PVPN(relayURL, roomID string) {
 	fmt.Println("\n🔒 Starting P2P VPN (System-Wide TUN Mode)...")
 	fmt.Println("⚠️  VPN mode requires Administrator privileges")
 
-	// 1. Connect to Relay
+	// CRITICAL FIX: Add relay bypass routes BEFORE connecting
+	// This prevents routing loop where relay WebSocket traffic goes through TUN
+	fmt.Println("🔧 Adding relay bypass routes...")
+	if err := addRelayBypassRoutes(relayURL); err != nil {
+		fmt.Printf("⚠️ Bypass route warning: %v (continuing anyway)\n", err)
+	}
+
+	// 1. Connect to Relay (now safe because bypass routes are in place)
 	fmt.Printf("🔌 Connecting to relay: %s/room/%s?role=client\n", relayURL, roomID)
 	conn, err := relay.Connect(relayURL, roomID, relay.RoleClient)
 	if err != nil {
