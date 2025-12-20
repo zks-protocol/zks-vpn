@@ -17,7 +17,7 @@ const (
 	tunIP            = "10.0.85.1"
 	tunNetmask       = "255.255.255.0"
 	mtu              = 1420
-	batchSize        = 64 // Read multiple packets at once
+	batchSize        = 8000 // Ultra Mode: ~1TB/day on Cloudflare Free Tier
 )
 
 // StartTUN creates the TUN device and starts processing packets
