@@ -87,7 +87,7 @@ impl DurableObject for VpnRoom {
                         role
                     );
                     // Close the old connection
-                    let _ = ws.close(1000, "New connection replaced this session");
+                    let _ = ws.close(Some(1000), Some("New connection replaced this session"));
                     // We don't return error, we proceed to accept the new one
                 }
             }
