@@ -232,7 +232,7 @@ async fn main() -> Result<(), BoxError> {
         Mode::Socks5 => run_socks5_mode(args, tunnel).await,
         Mode::Http => run_http_proxy_mode(args, tunnel).await,
         Mode::Vpn => run_vpn_mode(args, tunnel).await,
-        Mode::P2pClient | Mode::P2pVpn | Mode::ExitPeer | Mode::ExitPeerVpn => unreachable!(),
+        Mode::P2pClient | Mode::P2pVpn | Mode::ExitPeer | Mode::ExitPeerVpn | Mode::EntryNode => unreachable!(),
     }
 }
 
