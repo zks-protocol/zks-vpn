@@ -3,7 +3,6 @@ package vpn
 import (
 	"fmt"
 	"log"
-	"net"
 	"os/exec"
 	"strings"
 
