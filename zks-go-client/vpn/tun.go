@@ -236,32 +236,49 @@ func configureRouting(ifaceName string) error {
 	}
 
 	for _, route := range routes {
-		// Delete existing if any (ignore error)
-		exec.Command("route", "delete", route).Run()
-
-		// Add new route
-		parts := strings.Split(route, "/")
-		network := parts[0]
-		mask := "128.0.0.0" 
-
 		log.Printf("🛣️ Adding route: %s -> Interface %s", route, ifIndex)
-		cmd := exec.Command("netsh", "interface", "ipv4", "add", "route", route, "interface="+ifIndex, "metric=1")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("⚠️ netsh route add failed: %v, output: %s. Trying route.exe...", err, out)
+		
+		// Modern Windows approach: Use PowerShell's New-NetRoute cmdlet
+		// This is the most reliable method for Windows 10/11
+		// Format: New-NetRoute -DestinationPrefix "0.0.0.0/1" -InterfaceIndex <idx> -RouteMetric 1
+		psCmd := fmt.Sprintf(
+			"if (Get-NetRoute -DestinationPrefix '%s' -InterfaceIndex %s -ErrorAction SilentlyContinue) { Remove-NetRoute -DestinationPrefix '%s' -InterfaceIndex %s -Confirm:$false -ErrorAction SilentlyContinue }; New-NetRoute -DestinationPrefix '%s' -InterfaceIndex %s -RouteMetric 1 -ErrorAction Stop",
+			route, ifIndex, route, ifIndex, route, ifIndex,
+		)
+		
+		cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+		out, err := cmd.CombinedOutput()
+		
+		if err != nil {
+			log.Printf("⚠️ PowerShell New-NetRoute failed for %s: %v, output: %s", route, err, out)
 			
-			// Fallback to route.exe
-			// CRITICAL FIX: Use 0.0.0.0 as gateway (not tunIP) for interface-based routing
-			// Add METRIC 1 to ensure VPN routes take precedence over default route
-			cmd = exec.Command("route", "add", network, "mask", mask, "0.0.0.0", "IF", ifIndex, "METRIC", "1")
+			// Fallback 1: Try netsh
+			log.Printf("   Trying netsh fallback...")
+			cmd = exec.Command("netsh", "interface", "ipv4", "add", "route", route, "interface="+ifIndex, "metric=1")
 			if out, err := cmd.CombinedOutput(); err != nil {
-				log.Printf("❌ route.exe also failed: %v, output: %s", err, out)
-				// Continue to next route instead of failing completely
-				continue
+				log.Printf("   ⚠️ netsh also failed: %v, output: %s", err, out)
+				
+				// Fallback 2: Try route.exe
+				log.Printf("   Trying route.exe fallback...")
+				parts := strings.Split(route, "/")
+				network := parts[0]
+				mask := "128.0.0.0"
+				cmd = exec.Command("route", "add", network, "mask", mask, "0.0.0.0", "IF", ifIndex, "METRIC", "1")
+				if out, err := cmd.CombinedOutput(); err != nil {
+					log.Printf("   ❌ route.exe also failed: %v, output: %s", err, out)
+					log.Printf("   ⚠️ WARNING: Route %s could not be added! VPN may leak traffic!", route)
+					continue
+				}
+				log.Printf("   ✅ route.exe succeeded for %s", route)
+			} else {
+				log.Printf("   ✅ netsh succeeded for %s", route)
 			}
-			log.Printf("✅ route.exe succeeded for %s", route)
+		} else {
+			log.Printf("✅ Successfully added route %s via PowerShell", route)
 		}
 	}
-
+	
+	log.Printf("🎯 Route configuration complete")
 	return nil
 }
 
