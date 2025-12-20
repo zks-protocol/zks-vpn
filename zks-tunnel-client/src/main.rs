@@ -207,7 +207,8 @@ async fn main() -> Result<(), BoxError> {
         }
         Mode::EntryNode => {
             use entry_node::EntryNodeConfig;
-            let listen_addr: std::net::SocketAddr = format!("0.0.0.0:{}", args.listen_port).parse()?;
+            let listen_addr: std::net::SocketAddr =
+                format!("0.0.0.0:{}", args.listen_port).parse()?;
             let exit_node_addr: std::net::SocketAddr = args.exit_node.parse().map_err(|_| {
                 error!("Invalid exit node address: {}", args.exit_node);
                 "Invalid exit node address"
@@ -215,7 +216,8 @@ async fn main() -> Result<(), BoxError> {
             return entry_node::run_entry_node(EntryNodeConfig {
                 listen_addr,
                 exit_node_addr,
-            }).await;
+            })
+            .await;
         }
         _ => {}
     }
@@ -232,7 +234,9 @@ async fn main() -> Result<(), BoxError> {
         Mode::Socks5 => run_socks5_mode(args, tunnel).await,
         Mode::Http => run_http_proxy_mode(args, tunnel).await,
         Mode::Vpn => run_vpn_mode(args, tunnel).await,
-        Mode::P2pClient | Mode::P2pVpn | Mode::ExitPeer | Mode::ExitPeerVpn | Mode::EntryNode => unreachable!(),
+        Mode::P2pClient | Mode::P2pVpn | Mode::ExitPeer | Mode::ExitPeerVpn | Mode::EntryNode => {
+            unreachable!()
+        }
     }
 }
 
@@ -295,7 +299,10 @@ fn print_banner(args: &Args) {
         }
         Mode::EntryNode => {
             info!("║  Mode:   Entry Node (UDP Relay, Multi-Hop VPN)              ║");
-            info!("║  Listen: 0.0.0.0:{}                                      ", args.listen_port);
+            info!(
+                "║  Listen: 0.0.0.0:{}                                      ",
+                args.listen_port
+            );
             info!("║  Exit:   {}  ", args.exit_node);
         }
     }

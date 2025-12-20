@@ -71,9 +71,8 @@ impl EntryNodeState {
 
     fn cleanup_stale(&mut self, timeout_secs: u64) {
         let now = std::time::Instant::now();
-        self.clients.retain(|_, session| {
-            now.duration_since(session.last_seen).as_secs() < timeout_secs
-        });
+        self.clients
+            .retain(|_, session| now.duration_since(session.last_seen).as_secs() < timeout_secs);
     }
 }
 
