@@ -77,14 +77,20 @@ impl DurableObject for VpnRoom {
         };
 
         // Check if role is already taken by an ACTIVE connection
-        let existing_roles: Vec<PeerRole> = self
-            .get_all_sessions()
-            .into_iter()
-            .map(|s| s.role)
-            .collect();
-
-        if existing_roles.contains(&role) {
-            return Response::error(format!("{:?} already connected to this room", role), 409);
+        // IMPROVEMENT: Instead of rejecting, we KICK the old connection to allow reconnection
+        let websockets = self.state.get_websockets();
+        for ws in &websockets {
+            if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
+                if session.role == role {
+                    console_log!(
+                        "[VpnRoom] ⚠️ Kicking old {:?} connection to allow new one",
+                        role
+                    );
+                    // Close the old connection
+                    let _ = ws.close(1000, "New connection replaced this session");
+                    // We don't return error, we proceed to accept the new one
+                }
+            }
         }
 
         // Generate peer ID
@@ -120,6 +126,12 @@ impl DurableObject for VpnRoom {
         self.broadcast_text(&join_msg, Some(&peer_id));
 
         // Check if the other peer is connected
+        // We need to re-check because we might have just closed one
+        let existing_roles: Vec<PeerRole> = self
+            .get_all_sessions()
+            .into_iter()
+            .map(|s| s.role)
+            .collect();
         let peer_connected = existing_roles.iter().any(|r| *r != role);
 
         // Send welcome
@@ -148,12 +160,7 @@ impl DurableObject for VpnRoom {
 
         match message {
             WebSocketIncomingMessage::Binary(data) => {
-                console_log!(
-                    "[VpnRoom] Binary data from {:?} ({}): {} bytes",
-                    session.role,
-                    session.peer_id,
-                    data.len()
-                );
+                // OPTIMIZATION: Removed console_log to save CPU time (10ms limit)
                 // Relay binary ZKS-encrypted data to the OTHER peer only
                 // This is the core of the VPN relay - just forward encrypted blobs
                 self.relay_to_peer(&data, &session);
