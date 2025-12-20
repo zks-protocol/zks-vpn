@@ -17,9 +17,12 @@ const (
 	tunIP            = "10.0.85.1"
 	tunNetmask       = "255.255.255.0"
 	mtu              = 1420
-	// WireGuard-Go uses IdealBatchSize = 128 for optimal performance
-	// Reference: https://github.com/WireGuard/wireguard-go/blob/master/conn/bind_std.go
-	batchSize = 128
+	// BatchSize = 1024: Optimized for Cloudflare WebSocket Relay architecture
+	// - WireGuard uses 128 for direct kernel reads (latency-optimized)
+	// - We use 1024 for WebSocket relay (quota-optimized: 100k req/day limit)
+	// - Opportunistic batching means latency is NOT affected (sends immediately)
+	// - Daily limit: ~136 GB, RAM/user: ~1.5 MB, Max users: ~85
+	batchSize = 1024
 )
 
 // StartTUN creates the TUN device and starts processing packets

@@ -572,9 +572,12 @@ pub async fn run_exit_peer_vpn(
         let running_clone2 = running.clone();
         let tun_to_relay = tokio::spawn(async move {
             let mut buf = vec![0u8; 2048];
-            // WireGuard IdealBatchSize = 128 (industry standard)
-            // Reference: https://github.com/WireGuard/wireguard-go
-            let batch_size = 128;
+            // Batch Size 1024: Optimized for Cloudflare WebSocket Relay
+            // - WireGuard uses 128 for kernel reads (latency)
+            // - We use 1024 for WebSocket relay (100k req/day quota)
+            // - Opportunistic batching = zero latency penalty
+            // - Daily limit: ~136 GB, RAM/user: ~1.5 MB
+            let batch_size = 1024;
             let mut batch = Vec::with_capacity(batch_size);
 
             while running_clone2.load(Ordering::SeqCst) {
