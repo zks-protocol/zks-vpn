@@ -5,7 +5,8 @@
  * Uses WebSocket Hibernation for cost-efficient idle connections.
  *
  * Key features:
- * - Only 2 peers per room (Client + Exit Peer)
+ * - Supports 2-peer VPN mode (Client + Exit Peer)
+ * - Supports multi-peer Swarm mode (any number of peers)
  * - Zero-knowledge: Cannot decrypt ZKS-encrypted traffic
  * - Binary message relay for maximum throughput
  * - Automatic peer notification on join/leave
@@ -18,6 +19,7 @@ use worker::*;
 pub enum PeerRole {
     Client,
     ExitPeer,
+    Swarm, // Multi-peer mesh mode
 }
 
 /// Peer session data stored with hibernated WebSocket
@@ -25,13 +27,53 @@ pub enum PeerRole {
 struct PeerSession {
     peer_id: String,
     role: PeerRole,
+    addrs: Vec<String>, // Multiaddrs for P2P connectivity
     joined_at: u64,
 }
 
-/// Outbound events to clients
+/// Inbound messages from clients (matches client's SignalingRequest)
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ClientMessage {
+    /// Join a room with peer info
+    Join {
+        peer_id: String,
+        addrs: Vec<String>,
+        room_id: String,
+    },
+    /// Request list of peers
+    GetPeers,
+    /// Contribute entropy
+    Entropy { entropy: String },
+    /// Request hole-punch coordination
+    HolePunch { target_peer_id: String },
+    /// Simple ping
+    Ping,
+}
+
+/// Outbound events to clients (matches client's SignalingResponse)
 #[derive(Serialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum ServerEvent {
+    /// Acknowledgment of join (Swarm mode)
+    Joined { your_id: String },
+    /// List of peers in room (Swarm mode)
+    Peers { peers: Vec<PeerInfo> },
+    /// New peer joined (Swarm mode)
+    PeerJoined { peer: PeerInfo },
+    /// Peer left (Swarm mode)
+    PeerLeft { peer_id: String },
+    /// Swarm entropy
+    SwarmEntropy { entropy: String },
+    /// Hole-punch coordination
+    PunchAt {
+        timestamp_ms: u64,
+        target_addrs: Vec<String>,
+    },
+    /// Error message
+    Error { message: String },
+
+    // Legacy VPN mode events (backwards compatible)
     #[serde(rename = "welcome")]
     Welcome {
         your_id: String,
@@ -39,11 +81,19 @@ enum ServerEvent {
         peer_connected: bool,
     },
     #[serde(rename = "peer_join")]
-    PeerJoin { peer_id: String, role: String },
+    LegacyPeerJoin { peer_id: String, role: String },
     #[serde(rename = "peer_leave")]
-    PeerLeave { peer_id: String, role: String },
+    LegacyPeerLeave { peer_id: String, role: String },
     #[serde(rename = "pong")]
     Pong,
+}
+
+/// Peer info for Swarm mode
+#[derive(Clone, Serialize)]
+struct PeerInfo {
+    peer_id: String,
+    addrs: Vec<String>,
+    role: Option<String>,
 }
 
 #[durable_object]
@@ -73,22 +123,22 @@ impl DurableObject for VpnRoom {
         let role_str = params.get("role").map(|s| s.as_ref()).unwrap_or("client");
         let role = match role_str {
             "exit" | "exit-peer" | "exitpeer" => PeerRole::ExitPeer,
+            "swarm" => PeerRole::Swarm,
             _ => PeerRole::Client,
         };
 
-        // Check if role is already taken by an ACTIVE connection
-        // IMPROVEMENT: Instead of rejecting, we KICK the old connection to allow reconnection
-        let websockets = self.state.get_websockets();
-        for ws in &websockets {
-            if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
-                if session.role == role {
-                    console_log!(
-                        "[VpnRoom] ⚠️ Kicking old {:?} connection to allow new one",
-                        role
-                    );
-                    // Close the old connection
-                    let _ = ws.close(Some(1000), Some("New connection replaced this session"));
-                    // We don't return error, we proceed to accept the new one
+        // For VPN mode (Client/ExitPeer): check if role is already taken
+        if role != PeerRole::Swarm {
+            let websockets = self.state.get_websockets();
+            for ws in &websockets {
+                if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
+                    if session.role == role {
+                        console_log!(
+                            "[VpnRoom] ⚠️ Kicking old {:?} connection to allow new one",
+                            role
+                        );
+                        let _ = ws.close(Some(1000), Some("New connection replaced this session"));
+                    }
                 }
             }
         }
@@ -107,43 +157,46 @@ impl DurableObject for VpnRoom {
         // Accept with hibernation
         self.state.accept_web_socket(&server);
 
-        // Prepare session
+        // Prepare session (addrs will be filled in when Join message is received)
         let session = PeerSession {
             peer_id: peer_id.clone(),
             role,
+            addrs: vec![],
             joined_at: Date::now().as_millis(),
         };
 
         // Store session for hibernation recovery
         server.serialize_attachment(&session)?;
 
-        // Notify the other peer if connected
-        let join_msg = serde_json::to_string(&ServerEvent::PeerJoin {
-            peer_id: peer_id.clone(),
-            role: format!("{:?}", role),
-        })
-        .unwrap_or_default();
-        self.broadcast_text(&join_msg, Some(&peer_id));
+        if role == PeerRole::Swarm {
+            // Swarm mode: Don't send welcome yet, wait for Join message
+            console_log!("[VpnRoom] Swarm peer connected: {}", peer_id);
+        } else {
+            // VPN mode: Send legacy welcome immediately
+            let join_msg = serde_json::to_string(&ServerEvent::LegacyPeerJoin {
+                peer_id: peer_id.clone(),
+                role: format!("{:?}", role),
+            })
+            .unwrap_or_default();
+            self.broadcast_text(&join_msg, Some(&peer_id));
 
-        // Check if the other peer is connected
-        // We need to re-check because we might have just closed one
-        let existing_roles: Vec<PeerRole> = self
-            .get_all_sessions()
-            .into_iter()
-            .map(|s| s.role)
-            .collect();
-        let peer_connected = existing_roles.iter().any(|r| *r != role);
+            let existing_roles: Vec<PeerRole> = self
+                .get_all_sessions()
+                .into_iter()
+                .map(|s| s.role)
+                .collect();
+            let peer_connected = existing_roles.iter().any(|r| *r != role);
 
-        // Send welcome
-        let welcome = serde_json::to_string(&ServerEvent::Welcome {
-            your_id: peer_id.clone(),
-            role: format!("{:?}", role),
-            peer_connected,
-        })
-        .unwrap_or_default();
-        let _ = server.send_with_str(&welcome);
+            let welcome = serde_json::to_string(&ServerEvent::Welcome {
+                your_id: peer_id.clone(),
+                role: format!("{:?}", role),
+                peer_connected,
+            })
+            .unwrap_or_default();
+            let _ = server.send_with_str(&welcome);
 
-        console_log!("[VpnRoom] {:?} joined: {}", role, peer_id);
+            console_log!("[VpnRoom] {:?} joined: {}", role, peer_id);
+        }
 
         Response::from_websocket(client)
     }
@@ -153,34 +206,120 @@ impl DurableObject for VpnRoom {
         ws: WebSocket,
         message: WebSocketIncomingMessage,
     ) -> Result<()> {
-        let session: PeerSession = match ws.deserialize_attachment::<PeerSession>() {
+        let mut session: PeerSession = match ws.deserialize_attachment::<PeerSession>() {
             Ok(Some(s)) => s,
             _ => return Ok(()),
         };
 
         match message {
             WebSocketIncomingMessage::Binary(data) => {
-                // OPTIMIZATION: Removed console_log to save CPU time (10ms limit)
                 // Relay binary ZKS-encrypted data to the OTHER peer only
-                // This is the core of the VPN relay - just forward encrypted blobs
                 self.relay_to_peer(&data, &session);
             }
             WebSocketIncomingMessage::String(text) => {
-                console_log!(
-                    "[VpnRoom] Text message from {:?} ({}): {}",
-                    session.role,
-                    session.peer_id,
-                    text
-                );
-                // Handle ping/pong keepalive
-                if text == "ping" || text == "{\"type\":\"ping\"}" {
-                    let pong = serde_json::to_string(&ServerEvent::Pong).unwrap_or_default();
-                    if let Err(e) = ws.send_with_str(&pong) {
-                        console_error!("[VpnRoom] Failed to send pong: {:?}", e);
+                // Try to parse as ClientMessage
+                if let Ok(msg) = serde_json::from_str::<ClientMessage>(&text) {
+                    match msg {
+                        ClientMessage::Join { peer_id, addrs, .. } => {
+                            // Update session with peer info
+                            session.peer_id = peer_id.clone();
+                            session.addrs = addrs.clone();
+                            ws.serialize_attachment(&session)?;
+
+                            console_log!(
+                                "[VpnRoom] Swarm Join: {} with {} addrs",
+                                peer_id,
+                                addrs.len()
+                            );
+
+                            // Send Joined acknowledgment
+                            let joined = serde_json::to_string(&ServerEvent::Joined {
+                                your_id: peer_id.clone(),
+                            })
+                            .unwrap_or_default();
+                            let _ = ws.send_with_str(&joined);
+
+                            // Notify other Swarm peers
+                            let peer_info = PeerInfo {
+                                peer_id: peer_id.clone(),
+                                addrs,
+                                role: Some("swarm".to_string()),
+                            };
+                            let notify = serde_json::to_string(&ServerEvent::PeerJoined {
+                                peer: peer_info,
+                            })
+                            .unwrap_or_default();
+                            self.broadcast_to_swarm(&notify, Some(&session.peer_id));
+                        }
+
+                        ClientMessage::GetPeers => {
+                            // Return all Swarm peers with their addresses
+                            let peers: Vec<PeerInfo> = self
+                                .get_all_sessions()
+                                .into_iter()
+                                .filter(|s| s.role == PeerRole::Swarm && s.peer_id != session.peer_id)
+                                .map(|s| PeerInfo {
+                                    peer_id: s.peer_id,
+                                    addrs: s.addrs,
+                                    role: Some("swarm".to_string()),
+                                })
+                                .collect();
+
+                            console_log!(
+                                "[VpnRoom] GetPeers: returning {} peers to {}",
+                                peers.len(),
+                                session.peer_id
+                            );
+
+                            let response =
+                                serde_json::to_string(&ServerEvent::Peers { peers })
+                                    .unwrap_or_default();
+                            let _ = ws.send_with_str(&response);
+                        }
+
+                        ClientMessage::Entropy { entropy } => {
+                            // Broadcast entropy to all Swarm peers
+                            let response = serde_json::to_string(&ServerEvent::SwarmEntropy {
+                                entropy,
+                            })
+                            .unwrap_or_default();
+                            self.broadcast_to_swarm(&response, Some(&session.peer_id));
+                        }
+
+                        ClientMessage::HolePunch { target_peer_id } => {
+                            // Find target peer and get their addrs
+                            if let Some(target) = self
+                                .get_all_sessions()
+                                .into_iter()
+                                .find(|s| s.peer_id == target_peer_id)
+                            {
+                                let response = serde_json::to_string(&ServerEvent::PunchAt {
+                                    timestamp_ms: Date::now().as_millis() + 500, // 500ms from now
+                                    target_addrs: target.addrs,
+                                })
+                                .unwrap_or_default();
+                                let _ = ws.send_with_str(&response);
+                            } else {
+                                let err = serde_json::to_string(&ServerEvent::Error {
+                                    message: format!("Peer {} not found", target_peer_id),
+                                })
+                                .unwrap_or_default();
+                                let _ = ws.send_with_str(&err);
+                            }
+                        }
+
+                        ClientMessage::Ping => {
+                            let pong =
+                                serde_json::to_string(&ServerEvent::Pong).unwrap_or_default();
+                            let _ = ws.send_with_str(&pong);
+                        }
                     }
+                } else if text == "ping" || text == "{\"type\":\"ping\"}" {
+                    // Legacy ping handling
+                    let pong = serde_json::to_string(&ServerEvent::Pong).unwrap_or_default();
+                    let _ = ws.send_with_str(&pong);
                 } else {
-                    // Forward text messages (control messages) to the other peer
-                    console_log!("[VpnRoom] Forwarding text to peer...");
+                    // Forward unrecognized text to other peer (VPN mode control messages)
                     self.relay_text_to_peer(&text, &session);
                 }
             }
@@ -199,12 +338,22 @@ impl DurableObject for VpnRoom {
         if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
             console_log!("[VpnRoom] {:?} left: {}", session.role, session.peer_id);
 
-            let leave_msg = serde_json::to_string(&ServerEvent::PeerLeave {
-                peer_id: session.peer_id,
-                role: format!("{:?}", session.role),
-            })
-            .unwrap_or_default();
-            self.broadcast_text(&leave_msg, None);
+            if session.role == PeerRole::Swarm {
+                // Notify Swarm peers
+                let leave_msg = serde_json::to_string(&ServerEvent::PeerLeft {
+                    peer_id: session.peer_id.clone(),
+                })
+                .unwrap_or_default();
+                self.broadcast_to_swarm(&leave_msg, None);
+            } else {
+                // Legacy VPN mode
+                let leave_msg = serde_json::to_string(&ServerEvent::LegacyPeerLeave {
+                    peer_id: session.peer_id,
+                    role: format!("{:?}", session.role),
+                })
+                .unwrap_or_default();
+                self.broadcast_text(&leave_msg, None);
+            }
         }
 
         Ok(())
@@ -214,12 +363,20 @@ impl DurableObject for VpnRoom {
         console_error!("[VpnRoom] WebSocket error: {:?}", error);
 
         if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
-            let leave_msg = serde_json::to_string(&ServerEvent::PeerLeave {
-                peer_id: session.peer_id,
-                role: format!("{:?}", session.role),
-            })
-            .unwrap_or_default();
-            self.broadcast_text(&leave_msg, None);
+            if session.role == PeerRole::Swarm {
+                let leave_msg = serde_json::to_string(&ServerEvent::PeerLeft {
+                    peer_id: session.peer_id.clone(),
+                })
+                .unwrap_or_default();
+                self.broadcast_to_swarm(&leave_msg, None);
+            } else {
+                let leave_msg = serde_json::to_string(&ServerEvent::LegacyPeerLeave {
+                    peer_id: session.peer_id,
+                    role: format!("{:?}", session.role),
+                })
+                .unwrap_or_default();
+                self.broadcast_text(&leave_msg, None);
+            }
         }
 
         Ok(())
@@ -235,17 +392,30 @@ impl VpnRoom {
             .collect()
     }
 
-    /// Relay binary data to the OTHER peer (not broadcast, point-to-point)
+    /// Broadcast to all Swarm peers only
+    fn broadcast_to_swarm(&self, text: &str, exclude_id: Option<&str>) {
+        for ws in self.state.get_websockets() {
+            if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
+                if session.role == PeerRole::Swarm
+                    && exclude_id.map(|id| id != session.peer_id).unwrap_or(true)
+                {
+                    let _ = ws.send_with_str(text);
+                }
+            }
+        }
+    }
+
+    /// Relay binary data to the OTHER peer (VPN mode: point-to-point)
     fn relay_to_peer(&self, data: &[u8], sender: &PeerSession) {
         let target_role = match sender.role {
             PeerRole::Client => PeerRole::ExitPeer,
             PeerRole::ExitPeer => PeerRole::Client,
+            PeerRole::Swarm => return, // Swarm doesn't use binary relay
         };
 
         for ws in self.state.get_websockets() {
             if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
                 if session.role == target_role {
-                    // Error handling: log but don't fail if send fails
                     if let Err(e) = ws.send_with_bytes(data) {
                         console_error!(
                             "[VpnRoom] Failed to send {} bytes to {:?}: {:?}",
@@ -254,56 +424,34 @@ impl VpnRoom {
                             e
                         );
                     }
-                    return; // Only one peer of each type
+                    return;
                 }
             }
         }
-
-        console_log!(
-            "[VpnRoom] No active {:?} peer found to relay {} bytes",
-            target_role,
-            data.len()
-        );
     }
 
-    /// Relay text to the OTHER peer
+    /// Relay text to the OTHER peer (VPN mode)
     fn relay_text_to_peer(&self, text: &str, sender: &PeerSession) {
         let target_role = match sender.role {
             PeerRole::Client => PeerRole::ExitPeer,
             PeerRole::ExitPeer => PeerRole::Client,
+            PeerRole::Swarm => return,
         };
-
-        console_log!(
-            "[VpnRoom] relay_text_to_peer: Looking for {:?} to forward message from {:?}",
-            target_role,
-            sender.role
-        );
 
         for ws in self.state.get_websockets() {
             if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
                 if session.role == target_role {
-                    console_log!(
-                        "[VpnRoom] ✅ Forwarding text to {:?} ({})",
-                        session.role,
-                        session.peer_id
-                    );
                     let _ = ws.send_with_str(text);
                     return;
                 }
             }
         }
-
-        console_log!(
-            "[VpnRoom] ❌ No {:?} peer found to forward message!",
-            target_role
-        );
     }
 
     fn broadcast_text(&self, text: &str, exclude_id: Option<&str>) {
         for ws in self.state.get_websockets() {
             if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
                 if exclude_id.map(|id| id != session.peer_id).unwrap_or(true) {
-                    // Error handling: log but continue on failure
                     if let Err(e) = ws.send_with_str(text) {
                         console_error!(
                             "[VpnRoom] Failed to broadcast to {:?} ({}): {:?}",
