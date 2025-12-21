@@ -50,10 +50,10 @@ impl std::error::Error for TunnelError {}
 /// Tunnel state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelState {
-    /// Waiting for key exchange to complete
-    WaitingForKey,
     /// Active and ready for data
     Active,
+    /// Error state (e.g., crypto failure)
+    Error,
 }
 
 /// Result of processing data
@@ -81,8 +81,8 @@ pub enum TunnResult {
 /// - TUN device IO
 /// - Async operations
 pub struct ZksTunnel {
-    /// Encryption key from key exchange (32 bytes)
-    key: Option<[u8; 32]>,
+    /// Encryption key from key exchange (32 bytes) - ALWAYS REQUIRED
+    key: [u8; 32],
     /// Current state
     state: TunnelState,
     /// Bytes sent
@@ -95,29 +95,14 @@ pub struct ZksTunnel {
     expected_len: Option<usize>,
 }
 
-impl Default for ZksTunnel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ZksTunnel {
-    /// Create a new tunnel (waiting for key)
-    pub fn new() -> Self {
+    /// Create a new tunnel with encryption key (REQUIRED)
+    ///
+    /// ZKS-VPN always encrypts traffic. A key must be provided
+    /// from the key exchange phase.
+    pub fn new(key: [u8; 32]) -> Self {
         Self {
-            key: None,
-            state: TunnelState::WaitingForKey,
-            tx_bytes: 0,
-            rx_bytes: 0,
-            partial_frame: Vec::with_capacity(MAX_PACKET_SIZE),
-            expected_len: None,
-        }
-    }
-
-    /// Create a tunnel with a pre-shared key
-    pub fn with_key(key: [u8; 32]) -> Self {
-        Self {
-            key: Some(key),
+            key,
             state: TunnelState::Active,
             tx_bytes: 0,
             rx_bytes: 0,
@@ -126,15 +111,19 @@ impl ZksTunnel {
         }
     }
 
-    /// Set the encryption key (transitions to Active state)
-    pub fn set_key(&mut self, key: [u8; 32]) {
-        self.key = Some(key);
-        self.state = TunnelState::Active;
-    }
-
     /// Get current state
     pub fn state(&self) -> TunnelState {
         self.state
+    }
+
+    /// Get the encryption key (for key rotation)
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    /// Update the encryption key (for key rotation)
+    pub fn rotate_key(&mut self, new_key: [u8; 32]) {
+        self.key = new_key;
     }
 
     /// Get statistics
@@ -173,15 +162,9 @@ impl ZksTunnel {
         let len_bytes = (data.len() as u32).to_be_bytes();
         dst[..4].copy_from_slice(&len_bytes);
 
-        // Copy payload (optionally with encryption)
-        if let Some(key) = &self.key {
-            // XOR encryption (Wasif-Vernam style)
-            for (i, &byte) in data.iter().enumerate() {
-                dst[4 + i] = byte ^ key[i % 32];
-            }
-        } else {
-            // No encryption
-            dst[4..4 + data.len()].copy_from_slice(data);
+        // XOR encryption (Wasif-Vernam cipher) - ALWAYS ACTIVE
+        for (i, &byte) in data.iter().enumerate() {
+            dst[4 + i] = byte ^ self.key[i % 32];
         }
 
         self.tx_bytes += total_len;
@@ -231,17 +214,12 @@ impl ZksTunnel {
                     return TunnResult::Err(TunnelError::BufferTooSmall);
                 }
 
-                // Extract and decrypt payload
+                // Extract and decrypt payload - ALWAYS DECRYPT
                 let payload = &self.partial_frame[4..total_needed];
 
-                if let Some(key) = &self.key {
-                    // XOR decryption
-                    for (i, &byte) in payload.iter().enumerate() {
-                        dst[i] = byte ^ key[i % 32];
-                    }
-                } else {
-                    // No decryption
-                    dst[..expected_len].copy_from_slice(payload);
+                // XOR decryption (Wasif-Vernam cipher)
+                for (i, &byte) in payload.iter().enumerate() {
+                    dst[i] = byte ^ self.key[i % 32];
                 }
 
                 debug!("Decapsulated {} bytes", expected_len);
@@ -272,8 +250,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encapsulate_decapsulate_no_key() {
-        let mut tunnel = ZksTunnel::new();
+    fn test_encapsulate_decapsulate() {
+        let key = [0x42u8; 32];
+        let mut tunnel = ZksTunnel::new(key);
         let data = b"Hello, ZKS!";
         let mut enc_buf = [0u8; 256];
         let mut dec_buf = [0u8; 256];
@@ -283,31 +262,7 @@ mod tests {
             TunnResult::WriteToNetwork(n) => {
                 assert_eq!(n, data.len() + 4);
 
-                // Decapsulate
-                match tunnel.decapsulate(&enc_buf[..n], &mut dec_buf) {
-                    TunnResult::WriteToTunnel(m) => {
-                        assert_eq!(m, data.len());
-                        assert_eq!(&dec_buf[..m], data);
-                    }
-                    _ => panic!("Expected WriteToTunnel"),
-                }
-            }
-            _ => panic!("Expected WriteToNetwork"),
-        }
-    }
-
-    #[test]
-    fn test_encapsulate_decapsulate_with_key() {
-        let key = [0x42u8; 32];
-        let mut tunnel = ZksTunnel::with_key(key);
-        let data = b"Encrypted message";
-        let mut enc_buf = [0u8; 256];
-        let mut dec_buf = [0u8; 256];
-
-        // Encapsulate
-        match tunnel.encapsulate(data, &mut enc_buf) {
-            TunnResult::WriteToNetwork(n) => {
-                // Verify encrypted data differs from plaintext
+                // Verify payload is encrypted (different from plaintext)
                 assert_ne!(&enc_buf[4..4 + data.len()], data);
 
                 // Decapsulate
@@ -324,8 +279,32 @@ mod tests {
     }
 
     #[test]
+    fn test_encryption_is_mandatory() {
+        let key = [0xABu8; 32];
+        let mut tunnel = ZksTunnel::new(key);
+        let data = b"Secret message";
+        let mut enc_buf = [0u8; 256];
+
+        // Encapsulate
+        match tunnel.encapsulate(data, &mut enc_buf) {
+            TunnResult::WriteToNetwork(n) => {
+                // Payload MUST be different from plaintext (encrypted)
+                let encrypted_payload = &enc_buf[4..n];
+                assert_ne!(encrypted_payload, data);
+                
+                // Verify XOR encryption: payload[i] = data[i] ^ key[i % 32]
+                for (i, &byte) in data.iter().enumerate() {
+                    assert_eq!(encrypted_payload[i], byte ^ key[i % 32]);
+                }
+            }
+            _ => panic!("Expected WriteToNetwork"),
+        }
+    }
+
+    #[test]
     fn test_partial_frame() {
-        let mut tunnel = ZksTunnel::new();
+        let key = [0x55u8; 32];
+        let mut tunnel = ZksTunnel::new(key);
         let data = b"Split me";
         let mut enc_buf = [0u8; 256];
         let mut dec_buf = [0u8; 256];
@@ -350,5 +329,17 @@ mod tests {
             }
             _ => panic!("Expected WriteToTunnel"),
         }
+    }
+
+    #[test]
+    fn test_key_rotation() {
+        let key1 = [0x11u8; 32];
+        let key2 = [0x22u8; 32];
+        let mut tunnel = ZksTunnel::new(key1);
+        
+        assert_eq!(tunnel.key(), &key1);
+        
+        tunnel.rotate_key(key2);
+        assert_eq!(tunnel.key(), &key2);
     }
 }
