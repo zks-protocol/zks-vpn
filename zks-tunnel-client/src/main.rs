@@ -24,6 +24,7 @@ mod entry_node;
 mod exit_node_udp;
 mod exit_peer;
 mod http_proxy;
+mod hybrid_data;
 mod key_exchange;
 mod p2p_client;
 mod p2p_relay;
@@ -32,6 +33,25 @@ mod socks5;
 mod stream_manager;
 mod tunnel;
 mod vpn;
+mod zks_tunnel;
+
+#[cfg(target_os = "linux")]
+mod tun_multiqueue;
+
+#[cfg(feature = "swarm")]
+mod p2p_swarm;
+
+#[cfg(feature = "swarm")]
+mod onion;
+
+#[cfg(feature = "swarm")]
+mod entropy_tax;
+
+#[cfg(feature = "swarm")]
+mod kyber_hybrid;
+
+#[cfg(feature = "swarm")]
+mod signaling;
 
 use http_proxy::HttpProxyServer;
 use socks5::Socks5Server;
@@ -70,6 +90,13 @@ pub enum Mode {
     /// Exit Node UDP mode - TUN forwarding for Multi-Hop VPN (second hop)
     #[value(name = "exit-node-udp")]
     ExitNodeUdp,
+    /// Exit Peer Hybrid mode - Worker signaling + Cloudflare Tunnel data
+    #[value(name = "exit-peer-hybrid")]
+    ExitPeerHybrid,
+    /// Faisal Swarm mode - P2P mesh with DCUtR hole-punching and bandwidth sharing
+    #[cfg(feature = "swarm")]
+    #[value(name = "swarm")]
+    Swarm,
 }
 
 /// ZKS-Tunnel VPN Client
@@ -226,6 +253,24 @@ async fn main() -> Result<(), BoxError> {
         Mode::ExitNodeUdp => {
             return exit_node_udp::run_exit_node_udp(args.listen_port).await;
         }
+        Mode::ExitPeerHybrid => {
+            let room_id = args.room.clone().unwrap_or_else(|| "default".to_string());
+            #[cfg(feature = "vpn")]
+            {
+                return run_exit_peer_hybrid_mode(args, room_id).await;
+            }
+            #[cfg(not(feature = "vpn"))]
+            {
+                error!("❌ Hybrid Exit Peer mode requires 'vpn' feature!");
+                error!("   Rebuild with: cargo build --release --features vpn");
+                return Err("VPN feature not enabled".into());
+            }
+        }
+        #[cfg(feature = "swarm")]
+        Mode::Swarm => {
+            let room_id = args.room.clone().unwrap_or_else(|| "default".to_string());
+            return run_swarm_mode(args, room_id).await;
+        }
         _ => {}
     }
 
@@ -246,7 +291,12 @@ async fn main() -> Result<(), BoxError> {
         | Mode::ExitPeer
         | Mode::ExitPeerVpn
         | Mode::EntryNode
-        | Mode::ExitNodeUdp => {
+        | Mode::ExitNodeUdp
+        | Mode::ExitPeerHybrid => {
+            unreachable!()
+        }
+        #[cfg(feature = "swarm")]
+        Mode::Swarm => {
             unreachable!()
         }
     }
@@ -323,6 +373,17 @@ fn print_banner(args: &Args) {
                 "║  Listen: 0.0.0.0:{}                                      ",
                 args.listen_port
             );
+        }
+        Mode::ExitPeerHybrid => {
+            info!("║  Mode:   Exit Peer Hybrid (Worker + Tunnel)                ║");
+            info!("║  Room:   {}  ", args.room.as_deref().unwrap_or("none"));
+            info!("║  Data:   TCP port 51821 (via Cloudflare Tunnel)            ║");
+        }
+        #[cfg(feature = "swarm")]
+        Mode::Swarm => {
+            info!("║  Mode:   Faisal Swarm (P2P Mesh + DCUtR)                    ║");
+            info!("║  Room:   {}  ", args.room.as_deref().unwrap_or("none"));
+            info!("║  Roles:  Client + Relay + Exit (bandwidth sharing)         ║");
         }
     }
 
@@ -512,5 +573,152 @@ fn check_privileges() -> Result<(), BoxError> {
         }
     }
 
+    Ok(())
+}
+
+/// Run as Exit Peer in Hybrid mode (Worker signaling + Cloudflare Tunnel data)
+///
+/// This mode uses:
+/// - Cloudflare Worker for signaling (key exchange, room management)  
+/// - Cloudflare Tunnel for data (TCP port 51821, unlimited bandwidth)
+#[cfg(feature = "vpn")]
+async fn run_exit_peer_hybrid_mode(_args: Args, room_id: String) -> Result<(), BoxError> {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use hybrid_data::{HybridDataState, run_hybrid_data_listener};
+    use p2p_relay::{P2PRelay, PeerRole};
+    
+    // Check privileges for TUN device
+    check_privileges()?;
+    
+    info!("🚀 Starting Hybrid Exit Peer Mode...");
+    info!("   Signaling: WebSocket via Cloudflare Worker");
+    info!("   Data: TCP port 51821 via Cloudflare Tunnel");
+    
+    // Create TUN device
+    let device = tun_rs::DeviceBuilder::new()
+        .ipv4(std::net::Ipv4Addr::new(10, 0, 85, 2), 24, None)
+        .mtu(1400)
+        .build_async()?;
+    
+    info!("✅ TUN device created (10.0.85.2/24)");
+    
+    // Enable IP forwarding and NAT on Linux
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("sysctl")
+            .args(["-w", "net.ipv4.ip_forward=1"])
+            .output();
+        info!("Enabled IP forwarding");
+        
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-A", "POSTROUTING", "-s", "10.0.85.0/24", "-j", "MASQUERADE"])
+            .output();
+            
+        // Add FORWARD rules
+        let _ = std::process::Command::new("iptables")
+            .args(["-I", "FORWARD", "-s", "10.0.85.0/24", "-j", "ACCEPT"])
+            .output();
+        let _ = std::process::Command::new("iptables")
+            .args(["-I", "FORWARD", "-d", "10.0.85.0/24", "-j", "ACCEPT"])
+            .output();
+        info!("Setup NAT masquerading and forwarding");
+    }
+    
+    // Create shared state for hybrid data handler
+    let state = Arc::new(RwLock::new(HybridDataState {
+        shared_secret: None,
+        tun_device: Some(Arc::new(device)),
+    }));
+    
+    // Start TCP data listener (for Cloudflare Tunnel)
+    let state_for_tcp = state.clone();
+    let tcp_task = tokio::spawn(async move {
+        if let Err(e) = run_hybrid_data_listener(51821, state_for_tcp).await {
+            error!("Hybrid data listener error: {}", e);
+        }
+    });
+    
+    // Connect to relay for signaling
+    info!("Connecting to relay for signaling...");
+    let relay = P2PRelay::connect(
+        &_args.relay,
+        &_args.vernam,
+        &room_id,
+        PeerRole::ExitPeer,
+        None,
+    ).await?;
+    
+    info!("✅ Connected to relay as Exit Peer (Hybrid Mode)");
+    info!("⏳ Waiting for Client to connect...");
+    info!("📡 Data port: localhost:51821 (expose via cloudflared)");
+    
+    // Wait for Ctrl+C
+    info!("");
+    info!("Press Ctrl+C to stop...");
+    
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C received. Shutting down...");
+        }
+        _ = tcp_task => {
+            error!("TCP listener exited unexpectedly");
+        }
+    }
+    
+    // Cleanup
+    relay.close().await?;
+    
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-D", "POSTROUTING", "-s", "10.0.85.0/24", "-j", "MASQUERADE"])
+            .output();
+    }
+    
+    info!("✅ Hybrid Exit Peer stopped.");
+    Ok(())
+}
+
+/// Run as Faisal Swarm node - P2P mesh with DCUtR hole-punching
+///
+/// Every node is simultaneously:
+/// - Client: Uses network for privacy
+/// - Relay: Forwards encrypted traffic for others
+/// - Exit: Provides internet access for others (native nodes)
+#[cfg(feature = "swarm")]
+async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
+    use p2p_swarm::{run_swarm_with_signaling, SwarmConfig};
+    
+    info!("🌐 Starting Faisal Swarm Mode...");
+    info!("   Room: {}", room_id);
+    info!("   Signaling: {}", args.relay);
+    info!("   Mode: Client + Relay + Exit");
+    
+    // Create config with signaling server details
+    let config = SwarmConfig {
+        relay_addr: None,
+        listen_port: 0,
+        signaling_url: args.relay.clone(),
+        room_id: room_id.clone(),
+    };
+    
+    info!("📡 Connecting to peers via signaling server...");
+    info!("");
+    info!("Press Ctrl+C to stop...");
+    
+    // Run swarm with signaling integration
+    tokio::select! {
+        result = run_swarm_with_signaling(config) => {
+            if let Err(e) = result {
+                error!("Swarm error: {}", e);
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Ctrl+C received. Shutting down...");
+        }
+    }
+    
+    info!("✅ Faisal Swarm stopped.");
     Ok(())
 }
