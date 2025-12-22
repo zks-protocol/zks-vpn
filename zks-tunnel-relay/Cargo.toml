@@ -17,9 +17,6 @@ getrandom = { version = "0.2", features = ["js"] }
 hex = "0.4"
 console_error_panic_hook = "0.1"
 
-# Local ZKS protocol
-zks-tunnel-proto = { path = "../zks-tunnel-proto" }
-
 [profile.release]
 opt-level = "s"
 lto = true
