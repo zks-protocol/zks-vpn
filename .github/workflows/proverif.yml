@@ -65,25 +65,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y maude graphviz
           
-          # Download Tamarin binary (correct structure)
+          # Download Tamarin 1.10.0 (latest as of Oct 2024)
+          wget -q https://github.com/tamarin-prover/tamarin-prover/releases/download/1.10.0/tamarin-prover-1.10.0-linux64-ubuntu.tar.gz || \
           wget -q https://github.com/tamarin-prover/tamarin-prover/releases/download/1.8.0/tamarin-prover-1.8.0-linux64-ubuntu.tar.gz
-          tar -xzf tamarin-prover-1.8.0-linux64-ubuntu.tar.gz
           
-          # Find and move the binary
-          find . -name "tamarin-prover" -type f -executable | head -1 | xargs -I {} sudo cp {} /usr/local/bin/tamarin-prover
+          tar -xzf tamarin-prover-*.tar.gz
           
-          # If not found, check for different structure
+          # Find and install the binary
+          find . -name "tamarin-prover" -type f -executable | head -1 | xargs -I {} sudo cp {} /usr/local/bin/tamarin-prover || true
+          
+          # Fallback: check different structures
           if [ ! -f /usr/local/bin/tamarin-prover ]; then
             ls -la
-            ls -la tamarin-prover* || true
-            # Try direct binary
+            for dir in tamarin-prover-*; do
+              if [ -d "$dir" ]; then
+                sudo cp "$dir/tamarin-prover" /usr/local/bin/ 2>/dev/null || true
+              fi
+            done
+            # Direct binary  
             if [ -f "tamarin-prover" ]; then
               sudo mv tamarin-prover /usr/local/bin/
             fi
           fi
           
           chmod +x /usr/local/bin/tamarin-prover || true
-          tamarin-prover --version || echo "Tamarin not found, will skip"
+          tamarin-prover --version || echo "Tamarin installation pending"
 
       - name: Verify ZKS Handshake (Tamarin)
         run: |
