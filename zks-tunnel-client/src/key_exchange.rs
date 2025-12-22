@@ -42,6 +42,7 @@ pub enum KeyExchangeRole {
 }
 
 /// Ephemeral key pair for authenticated X25519 key exchange
+#[allow(dead_code)]
 pub struct KeyExchange {
     /// Our role (initiator or responder)
     role: Option<KeyExchangeRole>,
