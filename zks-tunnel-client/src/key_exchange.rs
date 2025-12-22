@@ -247,21 +247,13 @@ impl KeyExchange {
             .peer_ephemeral_public
             .ok_or("No peer ephemeral public key")?;
 
-        // DH1: ephemeral × ephemeral (forward secrecy)
+        // DH: ephemeral × ephemeral (forward secrecy)
+        // Authentication is handled by HMAC proofs, not session key derivation
         let dh1 = eph_secret.diffie_hellman(&peer_eph_pk);
 
-        // DH2: identity × peer_ephemeral (authentication)
-        let dh2 = self.identity_secret.diffie_hellman(&peer_eph_pk);
-
-        // Combine DH results with HKDF
-        let mut combined = [0u8; 64];
-        combined[..32].copy_from_slice(dh1.as_bytes());
-        combined[..32]
-            .iter_mut()
-            .zip(dh2.as_bytes().iter())
-            .for_each(|(a, b)| *a ^= *b);
-
-        let hk = Hkdf::<Sha256>::new(Some(self.room_id.as_bytes()), &combined);
+        // Derive session key with HKDF
+        // Room ID provides domain separation
+        let hk = Hkdf::<Sha256>::new(Some(self.room_id.as_bytes()), dh1.as_bytes());
         let mut session_key = [0u8; 32];
         hk.expand(b"zks-session-key-v1", &mut session_key)
             .expect("HKDF expand failed");
@@ -578,6 +570,7 @@ pub enum KeyExchangeMessage {
     RttSync { timestamp_ms: u64 },
 }
 
+#[allow(dead_code)]
 impl KeyExchangeMessage {
     /// Create a public key message (LEGACY)
     pub fn new_public_key(pk_bytes: &[u8; 32]) -> Self {
