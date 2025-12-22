@@ -18,10 +18,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install ProVerif
+      - name: Install OCaml and ProVerif
         run: |
           sudo apt-get update
-          sudo apt-get install -y proverif
+          sudo apt-get install -y opam m4
+          opam init -y --disable-sandboxing
+          eval $(opam env)
+          opam install -y proverif
+          echo "$HOME/.opam/default/bin" >> $GITHUB_PATH
 
       - name: Verify ZKS Handshake
         run: |
