@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["worker",[["impl&lt;'a, T: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/convert/trait.AsRef.html\" title=\"trait core::convert::AsRef\">AsRef</a>&lt;<a class=\"primitive\" href=\"https://doc.rust-lang.org/1.92.0/std/primitive.str.html\">str</a>&gt;&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/iter/traits/collect/trait.FromIterator.html\" title=\"trait core::iter::traits::collect::FromIterator\">FromIterator</a>&lt;&amp;'a <a class=\"primitive\" href=\"https://doc.rust-lang.org/1.92.0/std/primitive.tuple.html\">(T, T)</a>&gt; for <a class=\"struct\" href=\"worker/struct.Headers.html\" title=\"struct worker::Headers\">Headers</a>"],["impl&lt;T: <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/convert/trait.AsRef.html\" title=\"trait core::convert::AsRef\">AsRef</a>&lt;<a class=\"primitive\" href=\"https://doc.rust-lang.org/1.92.0/std/primitive.str.html\">str</a>&gt;&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/1.92.0/core/iter/traits/collect/trait.FromIterator.html\" title=\"trait core::iter::traits::collect::FromIterator\">FromIterator</a>&lt;<a class=\"primitive\" href=\"https://doc.rust-lang.org/1.92.0/std/primitive.tuple.html\">(T, T)</a>&gt; for <a class=\"struct\" href=\"worker/struct.Headers.html\" title=\"struct worker::Headers\">Headers</a>"]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[1340]}

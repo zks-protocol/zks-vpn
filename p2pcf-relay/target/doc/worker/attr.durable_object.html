@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Integrate the struct with the Workers Runtime as Durable Object. Requires the `DurableObject` trait with the durable_object attribute macro on the struct."><title>durable_object in worker - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../static.files/rustdoc-ca0dd0c4.css"><meta name="rustdoc-vars" data-root-path="../" data-static-root-path="../static.files/" data-current-crate="worker" data-themes="" data-resource-suffix="" data-rustdoc-version="1.92.0 (ded5c06cf 2025-12-08)" data-channel="1.92.0" data-search-js="search-d69d8955.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../static.files/storage-e2aeef58.js"></script><script defer src="sidebar-items.js"></script><script defer src="../static.files/main-ce535bd0.js"></script><noscript><link rel="stylesheet" href="../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../static.files/favicon-044be391.svg"></head><body class="rustdoc attr"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">durable_object</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../worker/index.html">worker</a><span class="version">0.7.1</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">durable_<wbr>object</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#example" title="Example">Example</a></li><li><a href="#note" title="Note">Note</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="index.html">In crate worker</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="index.html">worker</a></div><h1>Attribute Macro <span class="attr">durable_<wbr>object</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"></span></div><pre class="rust item-decl"><code>#[durable_object]</code></pre><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Integrate the struct with the Workers Runtime as Durable Object.<br />
+Requires the <code>DurableObject</code> trait with the durable_object attribute macro on the struct.</p>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="attr">#[durable_object]
+</span><span class="kw">pub struct </span>Chatroom {
+    users: Vec&lt;User&gt;,
+    messages: Vec&lt;Message&gt;,
+    state: State,
+    env: Env, <span class="comment">// access `Env` across requests, use inside `fetch`
+</span>}
+
+<span class="kw">impl </span>DurableObject <span class="kw">for </span>Chatroom {
+    <span class="kw">fn </span>new(state: State, env: Env) -&gt; <span class="self">Self </span>{
+        <span class="self">Self </span>{
+            users: <span class="macro">vec!</span>[],
+            messages: <span class="macro">vec!</span>[],
+            state,
+            env,
+        }
+    }
+
+    <span class="kw">async fn </span>fetch(<span class="kw-2">&amp;</span><span class="self">self</span>, _req: Request) -&gt; <span class="prelude-ty">Result</span>&lt;Response&gt; {
+        <span class="comment">// do some work when a worker makes a request to this DO
+        </span>Response::ok(<span class="kw-2">&amp;</span><span class="macro">format!</span>(<span class="string">"{} active users."</span>, <span class="self">self</span>.users.len()))
+    }
+}</code></pre></div><h3 id="note"><a class="doc-anchor" href="#note">§</a>Note</h3>
+<p>By default all durable object events are enabled.
+Arguments may be provided to the macro to only generate the desired events, and reduce the generated JS &amp; Wasm output:</p>
+<ul>
+<li><code>fetch</code>: simple <code>fetch</code> target</li>
+<li><code>alarm</code>: with <a href="https://developers.cloudflare.com/durable-objects/examples/alarms-api/">Alarms API</a></li>
+<li><code>websocket</code>: <a href="https://developers.cloudflare.com/durable-objects/examples/websocket-hibernation-server/">WebSocket server</a></li>
+</ul>
+
+<div class="example-wrap"><pre class="rust rust-example-rendered"><code><span class="attr">#[durable_object(fetch)]
+</span><span class="kw">pub struct </span>Chatroom {
+    users: Vec&lt;User&gt;,
+    messages: Vec&lt;Message&gt;,
+    state: State,
+    env: Env, <span class="comment">// access `Env` across requests, use inside `fetch`
+</span>}</code></pre></div></div></details></section></div></main></body></html>

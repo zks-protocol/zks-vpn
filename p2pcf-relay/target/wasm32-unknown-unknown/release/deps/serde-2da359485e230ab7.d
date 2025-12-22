@@ -1,0 +1,14 @@
+D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\deps\serde-2da359485e230ab7.d: C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\build\serde-d0602380d4c63d01\out/private.rs
+
+D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\deps\libserde-2da359485e230ab7.rlib: C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\build\serde-d0602380d4c63d01\out/private.rs
+
+D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\deps\libserde-2da359485e230ab7.rmeta: C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\build\serde-d0602380d4c63d01\out/private.rs
+
+C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\lib.rs:
+C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\integer128.rs:
+C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\mod.rs:
+C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\de.rs:
+C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\serde-1.0.228\src\private\ser.rs:
+D:\BuzzU\p2pcf-relay\target\wasm32-unknown-unknown\release\build\serde-d0602380d4c63d01\out/private.rs:
+
+# env-dep:OUT_DIR=D:\\BuzzU\\p2pcf-relay\\target\\wasm32-unknown-unknown\\release\\build\\serde-d0602380d4c63d01\\out
