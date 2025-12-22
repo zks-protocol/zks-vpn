@@ -2,11 +2,9 @@ name: Formal Verification
 
 on:
   push:
-    paths:
-      - 'verification/**'
+    branches: [main, master]
   pull_request:
-    paths:
-      - 'verification/**'
+    branches: [main, master]
   workflow_dispatch:
 
 jobs:
