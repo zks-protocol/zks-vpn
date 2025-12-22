@@ -46,9 +46,7 @@ pub enum SignalingRequest {
         entropy: String, // hex-encoded 32 bytes
     },
     /// Request hole-punch coordination
-    HolePunch {
-        target_peer_id: String,
-    },
+    HolePunch { target_peer_id: String },
 }
 
 /// Messages received from signaling server
@@ -57,21 +55,13 @@ pub enum SignalingRequest {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SignalingResponse {
     /// Acknowledgment of join
-    Joined {
-        your_id: String,
-    },
+    Joined { your_id: String },
     /// List of peers in room
-    Peers {
-        peers: Vec<PeerInfo>,
-    },
+    Peers { peers: Vec<PeerInfo> },
     /// New peer joined the room
-    PeerJoined {
-        peer: PeerInfo,
-    },
+    PeerJoined { peer: PeerInfo },
     /// Peer left the room
-    PeerLeft {
-        peer_id: String,
-    },
+    PeerLeft { peer_id: String },
     /// Entropy from swarm
     SwarmEntropy {
         entropy: String, // hex-encoded
@@ -82,9 +72,7 @@ pub enum SignalingResponse {
         target_addrs: Vec<String>,
     },
     /// Error message
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// WebSocket signaling client
@@ -145,7 +133,9 @@ impl SignalingClient {
     }
 
     /// Get list of peers in the room
-    pub async fn get_peers(&mut self) -> Result<Vec<PeerInfo>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn get_peers(
+        &mut self,
+    ) -> Result<Vec<PeerInfo>, Box<dyn std::error::Error + Send + Sync>> {
         // Request peers
         let msg = SignalingRequest::GetPeers;
         let json = serde_json::to_string(&msg)?;
@@ -182,7 +172,10 @@ impl SignalingClient {
     }
 
     /// Broadcast our entropy contribution
-    pub async fn broadcast_entropy(&mut self, entropy: &[u8; 32]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn broadcast_entropy(
+        &mut self,
+        entropy: &[u8; 32],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let msg = SignalingRequest::Entropy {
             entropy: hex::encode(entropy),
         };
@@ -227,7 +220,7 @@ mod tests {
     fn test_signaling_response_deserialization() {
         let json = r#"{"type":"peers","peers":[{"peer_id":"12D3KooWTest","addrs":["/ip4/1.2.3.4/tcp/4001"]}]}"#;
         let response: SignalingResponse = serde_json::from_str(json).unwrap();
-        
+
         match response {
             SignalingResponse::Peers { peers } => {
                 assert_eq!(peers.len(), 1);

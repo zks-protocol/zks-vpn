@@ -38,19 +38,19 @@ impl EntropyPool {
         pool.refresh_our_contribution();
         pool
     }
-    
+
     /// Generate new random entropy for our contribution
     pub fn refresh_our_contribution(&mut self) {
         use rand_core::{OsRng, RngCore};
         OsRng.fill_bytes(&mut self.our_contribution);
         debug!("Generated new entropy contribution");
     }
-    
+
     /// Get our current entropy contribution (for broadcasting)
     pub fn get_our_contribution(&self) -> [u8; ENTROPY_SIZE] {
         self.our_contribution
     }
-    
+
     /// Receive and accumulate entropy from a peer
     pub fn receive_entropy(&mut self, entropy: &[u8; ENTROPY_SIZE]) {
         // XOR into K_Remote
@@ -58,14 +58,17 @@ impl EntropyPool {
             self.k_remote[i] ^= entropy[i];
         }
         self.contribution_count += 1;
-        debug!("Received entropy #{}, K_Remote updated", self.contribution_count);
+        debug!(
+            "Received entropy #{}, K_Remote updated",
+            self.contribution_count
+        );
     }
-    
+
     /// Get the current K_Remote value
     pub fn get_k_remote(&self) -> [u8; ENTROPY_SIZE] {
         self.k_remote
     }
-    
+
     /// Get the number of contributions received
     pub fn contribution_count(&self) -> u64 {
         self.contribution_count
@@ -84,27 +87,27 @@ impl EntropyTaxPayer {
             pool: Arc::new(RwLock::new(EntropyPool::new())),
         }
     }
-    
+
     /// Get a clone of the pool for sharing
     pub fn pool(&self) -> Arc<RwLock<EntropyPool>> {
         self.pool.clone()
     }
-    
+
     /// Get current K_Remote
     pub async fn get_k_remote(&self) -> [u8; ENTROPY_SIZE] {
         self.pool.read().await.get_k_remote()
     }
-    
+
     /// Receive entropy from a peer
     pub async fn receive_entropy(&self, entropy: &[u8; ENTROPY_SIZE]) {
         self.pool.write().await.receive_entropy(entropy);
     }
-    
+
     /// Get our contribution for broadcasting
     pub async fn get_our_contribution(&self) -> [u8; ENTROPY_SIZE] {
         self.pool.read().await.get_our_contribution()
     }
-    
+
     /// Refresh our entropy contribution
     pub async fn refresh_contribution(&self) {
         self.pool.write().await.refresh_our_contribution();
@@ -133,13 +136,13 @@ impl EntropyTaxMessage {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-            
+
         Self {
             entropy: hex::encode(entropy),
             timestamp_ms,
         }
     }
-    
+
     /// Parse entropy bytes from message
     pub fn parse_entropy(&self) -> Option<[u8; ENTROPY_SIZE]> {
         let bytes = hex::decode(&self.entropy).ok()?;
@@ -150,12 +153,12 @@ impl EntropyTaxMessage {
         arr.copy_from_slice(&bytes);
         Some(arr)
     }
-    
+
     /// Serialize to JSON
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
     }
-    
+
     /// Parse from JSON
     pub fn from_json(json: &str) -> Option<Self> {
         serde_json::from_str(json).ok()
@@ -167,23 +170,26 @@ pub async fn run_entropy_tax_loop(
     tax_payer: Arc<EntropyTaxPayer>,
     broadcast_fn: impl Fn(EntropyTaxMessage) + Send + Sync + 'static,
 ) {
-    info!("🎲 Starting Entropy Tax loop (refresh every {}s)", ENTROPY_REFRESH_INTERVAL);
-    
+    info!(
+        "🎲 Starting Entropy Tax loop (refresh every {}s)",
+        ENTROPY_REFRESH_INTERVAL
+    );
+
     let mut interval = tokio::time::interval(Duration::from_secs(ENTROPY_REFRESH_INTERVAL));
-    
+
     loop {
         interval.tick().await;
-        
+
         // Refresh our contribution
         tax_payer.refresh_contribution().await;
-        
+
         // Get our new contribution
         let contribution = tax_payer.get_our_contribution().await;
-        
+
         // Create and broadcast message
         let msg = EntropyTaxMessage::new(&contribution);
         broadcast_fn(msg);
-        
+
         let count = tax_payer.pool.read().await.contribution_count();
         debug!("Broadcast entropy, received {} contributions so far", count);
     }
@@ -192,40 +198,40 @@ pub async fn run_entropy_tax_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_entropy_pool() {
         let mut pool = EntropyPool::new();
-        
+
         // Initial K_Remote should be zero
         assert_eq!(pool.contribution_count(), 0);
-        
+
         // Add entropy
         let entropy1 = [0x42u8; ENTROPY_SIZE];
         pool.receive_entropy(&entropy1);
-        
+
         assert_eq!(pool.contribution_count(), 1);
         assert_eq!(pool.get_k_remote(), entropy1);
-        
+
         // Add more entropy (XOR)
         let entropy2 = [0x13u8; ENTROPY_SIZE];
         pool.receive_entropy(&entropy2);
-        
+
         assert_eq!(pool.contribution_count(), 2);
-        
+
         // K_Remote should be XOR of both
         let expected: [u8; ENTROPY_SIZE] = core::array::from_fn(|i| entropy1[i] ^ entropy2[i]);
         assert_eq!(pool.get_k_remote(), expected);
     }
-    
+
     #[test]
     fn test_entropy_message() {
         let entropy = [0xABu8; ENTROPY_SIZE];
         let msg = EntropyTaxMessage::new(&entropy);
-        
+
         let json = msg.to_json();
         let parsed = EntropyTaxMessage::from_json(&json).unwrap();
-        
+
         assert_eq!(parsed.parse_entropy().unwrap(), entropy);
     }
 }

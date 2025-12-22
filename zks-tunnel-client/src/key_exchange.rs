@@ -169,6 +169,34 @@ pub enum KeyExchangeMessage {
         /// Hex-encoded entropy bytes (32 bytes)
         entropy: String,
     },
+    /// DCUtR: Peer info for hole-punching (libp2p multiaddresses)
+    #[serde(rename = "peer_info")]
+    PeerInfo {
+        /// libp2p Peer ID as base58 string
+        peer_id: String,
+        /// List of libp2p multiaddresses (e.g., "/ip4/1.2.3.4/tcp/4001")
+        addrs: Vec<String>,
+    },
+    /// DCUtR: Request hole punch coordination
+    #[serde(rename = "hole_punch_request")]
+    HolePunchRequest {
+        /// Target peer ID to hole punch to
+        target_peer_id: String,
+    },
+    /// DCUtR: Accept hole punch and provide addresses
+    #[serde(rename = "hole_punch_accept")]
+    HolePunchAccept {
+        /// Peer ID of the accepter
+        peer_id: String,
+        /// Direct reachable addresses
+        addrs: Vec<String>,
+    },
+    /// DCUtR: RTT sync for coordinated simultaneous connection
+    #[serde(rename = "rtt_sync")]
+    RttSync {
+        /// Timestamp (unix millis) for synchronized connection attempt
+        timestamp_ms: u64,
+    },
 }
 
 impl KeyExchangeMessage {

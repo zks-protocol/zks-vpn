@@ -42,19 +42,22 @@ impl OnionKeys {
 }
 
 /// Encrypt data with onion layers (client-side)
-/// 
+///
 /// Wraps plaintext in two layers:
 /// 1. First encrypt with exit_key ⊕ k_remote (Exit Peer will decrypt this)
 /// 2. Then encrypt with relay_key ⊕ k_remote (Relay Peer will decrypt this)
 pub fn encrypt_onion(plaintext: &[u8], keys: &OnionKeys) -> OnionPacket {
-    debug!("Encrypting onion packet ({} bytes, 2 layers)", plaintext.len());
-    
+    debug!(
+        "Encrypting onion packet ({} bytes, 2 layers)",
+        plaintext.len()
+    );
+
     // Layer 1: Encrypt for Exit Peer
     let layer1 = xor_encrypt(plaintext, &keys.exit_key, &keys.k_remote);
-    
+
     // Layer 2: Encrypt for Relay Peer
     let layer2 = xor_encrypt(&layer1, &keys.relay_key, &keys.k_remote);
-    
+
     OnionPacket {
         data: layer2,
         layers: 2,
@@ -64,12 +67,19 @@ pub fn encrypt_onion(plaintext: &[u8], keys: &OnionKeys) -> OnionPacket {
 /// Decrypt one onion layer (relay or exit side)
 ///
 /// Each node decrypts with its key ⊕ k_remote, then passes to next hop
-pub fn decrypt_onion_layer(packet: &OnionPacket, key: &[u8; 32], k_remote: &[u8; 32]) -> OnionPacket {
-    debug!("Decrypting onion layer ({} bytes, {} layers remaining)", 
-           packet.data.len(), packet.layers);
-    
+pub fn decrypt_onion_layer(
+    packet: &OnionPacket,
+    key: &[u8; 32],
+    k_remote: &[u8; 32],
+) -> OnionPacket {
+    debug!(
+        "Decrypting onion layer ({} bytes, {} layers remaining)",
+        packet.data.len(),
+        packet.layers
+    );
+
     let decrypted = xor_decrypt(&packet.data, key, k_remote);
-    
+
     OnionPacket {
         data: decrypted,
         layers: packet.layers.saturating_sub(1),
@@ -79,18 +89,18 @@ pub fn decrypt_onion_layer(packet: &OnionPacket, key: &[u8; 32], k_remote: &[u8;
 /// Wasif-Vernam XOR encryption: P ⊕ K_Local ⊕ K_Remote
 fn xor_encrypt(plaintext: &[u8], k_local: &[u8; 32], k_remote: &[u8; 32]) -> Vec<u8> {
     let mut ciphertext = Vec::with_capacity(plaintext.len());
-    
+
     for (i, &byte) in plaintext.iter().enumerate() {
         let key_byte = k_local[i % 32] ^ k_remote[i % 32];
         ciphertext.push(byte ^ key_byte);
     }
-    
+
     ciphertext
 }
 
 /// Wasif-Vernam XOR decryption (same as encryption - symmetric)
 fn xor_decrypt(ciphertext: &[u8], k_local: &[u8; 32], k_remote: &[u8; 32]) -> Vec<u8> {
-    xor_encrypt(ciphertext, k_local, k_remote)  // XOR is symmetric
+    xor_encrypt(ciphertext, k_local, k_remote) // XOR is symmetric
 }
 
 /// Route through the onion network
@@ -119,7 +129,7 @@ impl OnionRoute {
             exit_addr: exit_addr.into(),
         }
     }
-    
+
     /// Log the route for debugging
     pub fn log_route(&self) {
         info!("🧅 Onion Route:");
@@ -131,7 +141,7 @@ impl OnionRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_onion_encryption() {
         let plaintext = b"Hello, Triple-Blind World!";
@@ -140,19 +150,19 @@ mod tests {
             relay_key: [0x13; 32],
             k_remote: [0x37; 32],
         };
-        
+
         // Client encrypts
         let onion = encrypt_onion(plaintext, &keys);
         assert_eq!(onion.layers, 2);
-        assert_ne!(&onion.data, plaintext);  // Should be encrypted
-        
+        assert_ne!(&onion.data, plaintext); // Should be encrypted
+
         // Relay decrypts layer 2
         let after_relay = decrypt_onion_layer(&onion, &keys.relay_key, &keys.k_remote);
         assert_eq!(after_relay.layers, 1);
-        
+
         // Exit decrypts layer 1
         let final_data = decrypt_onion_layer(&after_relay, &keys.exit_key, &keys.k_remote);
         assert_eq!(final_data.layers, 0);
-        assert_eq!(&final_data.data, plaintext);  // Should be decrypted
+        assert_eq!(&final_data.data, plaintext); // Should be decrypted
     }
 }

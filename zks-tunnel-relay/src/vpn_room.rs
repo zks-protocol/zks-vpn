@@ -39,6 +39,7 @@ enum ClientMessage {
     Join {
         peer_id: String,
         addrs: Vec<String>,
+        #[allow(dead_code)]
         room_id: String,
     },
     /// Request list of peers
@@ -245,10 +246,9 @@ impl DurableObject for VpnRoom {
                                 addrs,
                                 role: Some("swarm".to_string()),
                             };
-                            let notify = serde_json::to_string(&ServerEvent::PeerJoined {
-                                peer: peer_info,
-                            })
-                            .unwrap_or_default();
+                            let notify =
+                                serde_json::to_string(&ServerEvent::PeerJoined { peer: peer_info })
+                                    .unwrap_or_default();
                             self.broadcast_to_swarm(&notify, Some(&session.peer_id));
                         }
 
@@ -257,7 +257,9 @@ impl DurableObject for VpnRoom {
                             let peers: Vec<PeerInfo> = self
                                 .get_all_sessions()
                                 .into_iter()
-                                .filter(|s| s.role == PeerRole::Swarm && s.peer_id != session.peer_id)
+                                .filter(|s| {
+                                    s.role == PeerRole::Swarm && s.peer_id != session.peer_id
+                                })
                                 .map(|s| PeerInfo {
                                     peer_id: s.peer_id,
                                     addrs: s.addrs,
@@ -271,18 +273,16 @@ impl DurableObject for VpnRoom {
                                 session.peer_id
                             );
 
-                            let response =
-                                serde_json::to_string(&ServerEvent::Peers { peers })
-                                    .unwrap_or_default();
+                            let response = serde_json::to_string(&ServerEvent::Peers { peers })
+                                .unwrap_or_default();
                             let _ = ws.send_with_str(&response);
                         }
 
                         ClientMessage::Entropy { entropy } => {
                             // Broadcast entropy to all Swarm peers
-                            let response = serde_json::to_string(&ServerEvent::SwarmEntropy {
-                                entropy,
-                            })
-                            .unwrap_or_default();
+                            let response =
+                                serde_json::to_string(&ServerEvent::SwarmEntropy { entropy })
+                                    .unwrap_or_default();
                             self.broadcast_to_swarm(&response, Some(&session.peer_id));
                         }
 

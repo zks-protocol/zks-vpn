@@ -8,6 +8,8 @@
 #![allow(dead_code)]
 
 #[cfg(feature = "swarm")]
+use futures::StreamExt;
+#[cfg(feature = "swarm")]
 use libp2p::{
     dcutr, identify, noise, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
@@ -17,8 +19,6 @@ use libp2p::{
 use std::time::Duration;
 #[cfg(feature = "swarm")]
 use tracing::{debug, info, warn};
-#[cfg(feature = "swarm")]
-use futures::StreamExt;
 
 /// Combined network behavior for ZKS Swarm
 #[cfg(feature = "swarm")]
@@ -87,10 +87,7 @@ pub async fn create_swarm(
         .with_relay_client(noise::Config::new, yamux::Config::default)?
         .with_behaviour(|keypair, relay_client| {
             // Build identify config
-            let identify_config = identify::Config::new(
-                "/zks/1.0.0".to_string(),
-                keypair.public(),
-            );
+            let identify_config = identify::Config::new("/zks/1.0.0".to_string(), keypair.public());
 
             SwarmBehaviour {
                 relay_client,
@@ -99,9 +96,7 @@ pub async fn create_swarm(
                 ping: libp2p::ping::Behaviour::default(),
             }
         })?
-        .with_swarm_config(|cfg| {
-            cfg.with_idle_connection_timeout(Duration::from_secs(60))
-        })
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
         .build();
 
     // Get our peer ID
@@ -109,22 +104,24 @@ pub async fn create_swarm(
     info!("📍 Local Peer ID: {}", local_peer_id);
 
     // Listen on QUIC (primary - lower latency)
-    let quic_addr: Multiaddr = format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port).parse()?;
+    let quic_addr: Multiaddr =
+        format!("/ip4/0.0.0.0/udp/{}/quic-v1", config.listen_port).parse()?;
     swarm.listen_on(quic_addr)?;
-    
+
     // Listen on TCP (fallback - firewall-friendly)
     let tcp_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", config.listen_port).parse()?;
     swarm.listen_on(tcp_addr)?;
-    
+
     info!("📶 Transports: QUIC (primary) + TCP (fallback)");
 
     // If relay address provided, connect to it
     if let Some(relay_addr) = &config.relay_addr {
         info!("📡 Connecting to relay: {}", relay_addr);
         swarm.dial(relay_addr.clone())?;
-        
+
         // Listen via relay for incoming connections
-        let relay_listen = relay_addr.clone()
+        let relay_listen = relay_addr
+            .clone()
             .with(libp2p::multiaddr::Protocol::P2pCircuit);
         swarm.listen_on(relay_listen)?;
     }
@@ -144,7 +141,9 @@ pub async fn run_swarm_loop(
             SwarmEvent::NewListenAddr { address, .. } => {
                 info!("✅ Listening on: {}", address);
             }
-            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
                 // Show transport type used (QUIC or TCP)
                 let addr = endpoint.get_remote_address().to_string();
                 let transport = if addr.contains("quic") {
@@ -152,7 +151,10 @@ pub async fn run_swarm_loop(
                 } else {
                     "TCP 🔌"
                 };
-                info!("🤝 Connected to peer: {} via {} [{}]", peer_id, transport, addr);
+                info!(
+                    "🤝 Connected to peer: {} via {} [{}]",
+                    peer_id, transport, addr
+                );
             }
             SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
                 debug!("🔌 Disconnected from peer: {} ({:?})", peer_id, cause);
@@ -181,33 +183,35 @@ pub async fn run_swarm_with_signaling(
     config: SwarmConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::signaling::SignalingClient;
-    
+
     // Create the swarm
     let (mut swarm, config) = create_swarm(config).await?;
     let local_peer_id = *swarm.local_peer_id();
-    
+
     // Wait briefly for listeners to be established
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    
+
     // Collect our listening addresses
     let listen_addrs: Vec<Multiaddr> = swarm.listeners().cloned().collect();
     info!("📍 Our addresses: {:?}", listen_addrs);
-    
+
     // Connect to signaling server
     match SignalingClient::connect(
         &config.signaling_url,
         &config.room_id,
         &local_peer_id,
         listen_addrs,
-    ).await {
+    )
+    .await
+    {
         Ok(mut signaling) => {
             info!("✅ Connected to signaling server");
-            
+
             // Get peers from signaling
             match signaling.get_peers().await {
                 Ok(peers) => {
                     info!("📥 Discovered {} peers", peers.len());
-                    
+
                     // Dial each discovered peer
                     for peer in peers {
                         if peer.peer_id != local_peer_id.to_string() {
@@ -227,11 +231,13 @@ pub async fn run_swarm_with_signaling(
             }
         }
         Err(e) => {
-            warn!("⚠️ Signaling connection failed: {}. Running in standalone mode.", e);
+            warn!(
+                "⚠️ Signaling connection failed: {}. Running in standalone mode.",
+                e
+            );
         }
     }
-    
+
     // Run the main event loop
     run_swarm_loop(swarm).await
 }
-

@@ -8,9 +8,9 @@
 #![allow(dead_code)]
 
 #[cfg(target_os = "linux")]
-use std::io::{self, Read, Write};
+use std::io;
 #[cfg(target_os = "linux")]
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, RawFd};
 
 /// ioctl request code for setting TUN interface flags
 #[cfg(target_os = "linux")]
@@ -140,7 +140,12 @@ impl MultiQueueTun {
     /// Create a single queue (file descriptor) for the TUN device
     fn create_queue(name: &str) -> io::Result<RawFd> {
         // Open /dev/net/tun
-        let fd = unsafe { libc::open(b"/dev/net/tun\0".as_ptr() as *const libc::c_char, libc::O_RDWR) };
+        let fd = unsafe {
+            libc::open(
+                b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
+                libc::O_RDWR,
+            )
+        };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
