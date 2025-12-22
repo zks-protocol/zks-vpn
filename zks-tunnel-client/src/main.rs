@@ -50,7 +50,7 @@ mod onion;
 mod entropy_tax;
 
 #[cfg(feature = "swarm")]
-mod kyber_hybrid;
+
 
 #[cfg(feature = "swarm")]
 mod signaling;
