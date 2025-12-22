@@ -14,6 +14,7 @@ path = "src/main.rs"
 default = ["socks5"]
 socks5 = []
 vpn = ["tun-rs", "netstack-smoltcp", "smoltcp"]
+swarm = ["dep:libp2p", "dep:pqcrypto-kyber", "dep:pqcrypto-traits", "vpn"]
 
 [dependencies]
 zks-tunnel-proto = { path = "../zks-tunnel-proto" }
@@ -51,6 +52,13 @@ simple-dns = "0.6"
 tokio-socks = "0.5"
 native-tls = "0.2"
 tokio-native-tls = "0.3"
+
+# libp2p for P2P swarm with DCUtR hole-punching (optional, for swarm feature)
+libp2p = { version = "0.54", features = ["dcutr", "relay", "identify", "noise", "tcp", "quic", "yamux", "dns", "tokio", "macros", "ping"], optional = true }
+
+# Post-quantum cryptography (optional, for swarm feature)
+pqcrypto-kyber = { version = "0.8", optional = true }
+pqcrypto-traits = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Windows-specific: Wintun driver bindings

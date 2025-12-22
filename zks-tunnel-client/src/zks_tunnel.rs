@@ -9,7 +9,7 @@
 //! - Swap transports (TCP/UDP/WebSocket/QUIC)
 //! - Add features like FEC without touching IO code
 
-use std::io::{self, Write};
+use std::io;
 use tracing::debug;
 
 /// Maximum packet size (MTU + headers)
