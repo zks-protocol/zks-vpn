@@ -81,7 +81,7 @@ impl KeyExchange {
         let identity_seed = Self::derive_identity_seed(room_id);
         let identity_secret = StaticSecret::from(identity_seed);
         let identity_public = PublicKey::from(&identity_secret);
-        
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -108,7 +108,8 @@ impl KeyExchange {
     fn derive_identity_seed(room_id: &str) -> [u8; 32] {
         let hk = Hkdf::<Sha256>::new(Some(b"zks-identity-v1"), room_id.as_bytes());
         let mut seed = [0u8; 32];
-        hk.expand(b"identity-key", &mut seed).expect("HKDF expand failed");
+        hk.expand(b"identity-key", &mut seed)
+            .expect("HKDF expand failed");
         seed
     }
 
@@ -130,18 +131,19 @@ impl KeyExchange {
     /// Contains: ephemeral_pk + encrypted_identity
     pub fn create_auth_init(&mut self) -> Result<KeyExchangeMessage, &'static str> {
         self.role = Some(KeyExchangeRole::Initiator);
-        
+
         if self.ephemeral_secret.is_none() {
             self.generate_keypair();
         }
 
-        let eph_pk = self.get_ephemeral_public_bytes()
+        let eph_pk = self
+            .get_ephemeral_public_bytes()
             .ok_or("No ephemeral public key")?;
 
         // Encrypted identity: we encrypt our identity proof
         // This is a commitment that we know the room
         let identity_proof = self.create_identity_proof(&eph_pk);
-        
+
         self.state = KeyExchangeState::InitiatorWaitingForResponse;
 
         Ok(KeyExchangeMessage::AuthInit {
@@ -167,17 +169,19 @@ impl KeyExchange {
         auth_init: &KeyExchangeMessage,
     ) -> Result<KeyExchangeMessage, &'static str> {
         self.role = Some(KeyExchangeRole::Responder);
-        
+
         let (peer_eph_pk_hex, identity_proof_hex, peer_timestamp) = match auth_init {
-            KeyExchangeMessage::AuthInit { ephemeral_pk, encrypted_identity, timestamp } => {
-                (ephemeral_pk, encrypted_identity, *timestamp)
-            }
+            KeyExchangeMessage::AuthInit {
+                ephemeral_pk,
+                encrypted_identity,
+                timestamp,
+            } => (ephemeral_pk, encrypted_identity, *timestamp),
             _ => return Err("Expected AuthInit message"),
         };
 
         // Parse peer's ephemeral public key
-        let peer_eph_pk_bytes = hex::decode(peer_eph_pk_hex)
-            .map_err(|_| "Invalid hex in ephemeral_pk")?;
+        let peer_eph_pk_bytes =
+            hex::decode(peer_eph_pk_hex).map_err(|_| "Invalid hex in ephemeral_pk")?;
         if peer_eph_pk_bytes.len() != 32 {
             return Err("Invalid ephemeral public key length");
         }
@@ -186,9 +190,9 @@ impl KeyExchange {
         let peer_eph_pk = PublicKey::from(pk_array);
 
         // Verify identity proof (peer must know the room)
-        let identity_proof = hex::decode(identity_proof_hex)
-            .map_err(|_| "Invalid hex in identity_proof")?;
-        
+        let identity_proof =
+            hex::decode(identity_proof_hex).map_err(|_| "Invalid hex in identity_proof")?;
+
         self.verify_identity_proof(&pk_array, peer_timestamp, &identity_proof)?;
 
         // Generate our ephemeral keypair
@@ -203,7 +207,8 @@ impl KeyExchange {
         self.compute_session_key()?;
 
         // Create auth proof
-        let our_eph_pk = self.get_ephemeral_public_bytes()
+        let our_eph_pk = self
+            .get_ephemeral_public_bytes()
             .ok_or("No ephemeral public key")?;
         let auth_mac = self.create_auth_mac(&our_eph_pk, &pk_array)?;
 
@@ -216,37 +221,45 @@ impl KeyExchange {
     }
 
     /// Verify peer's identity proof
-    fn verify_identity_proof(&self, peer_eph_pk: &[u8; 32], timestamp: u64, proof: &[u8]) -> Result<(), &'static str> {
+    fn verify_identity_proof(
+        &self,
+        peer_eph_pk: &[u8; 32],
+        timestamp: u64,
+        proof: &[u8],
+    ) -> Result<(), &'static str> {
         // Peer should have derived the same identity_secret from room
         let mut mac = HmacSha256::new_from_slice(self.identity_secret.as_bytes())
             .expect("HMAC can take key of any size");
         mac.update(peer_eph_pk);
         mac.update(&timestamp.to_le_bytes());
         mac.update(b"initiator_identity");
-        
+
         mac.verify_slice(proof)
             .map_err(|_| "Identity proof verification failed - peer doesn't know room")?;
-        
+
         Ok(())
     }
 
     /// Compute session key from DH
     fn compute_session_key(&mut self) -> Result<(), &'static str> {
-        let eph_secret = self.ephemeral_secret.take()
-            .ok_or("No ephemeral secret")?;
-        let peer_eph_pk = self.peer_ephemeral_public
+        let eph_secret = self.ephemeral_secret.take().ok_or("No ephemeral secret")?;
+        let peer_eph_pk = self
+            .peer_ephemeral_public
             .ok_or("No peer ephemeral public key")?;
 
         // DH1: ephemeral × ephemeral (forward secrecy)
         let dh1 = eph_secret.diffie_hellman(&peer_eph_pk);
-        
+
         // DH2: identity × peer_ephemeral (authentication)
         let dh2 = self.identity_secret.diffie_hellman(&peer_eph_pk);
 
         // Combine DH results with HKDF
         let mut combined = [0u8; 64];
         combined[..32].copy_from_slice(dh1.as_bytes());
-        combined[..32].iter_mut().zip(dh2.as_bytes().iter()).for_each(|(a, b)| *a ^= *b);
+        combined[..32]
+            .iter_mut()
+            .zip(dh2.as_bytes().iter())
+            .for_each(|(a, b)| *a ^= *b);
 
         let hk = Hkdf::<Sha256>::new(Some(self.room_id.as_bytes()), &combined);
         let mut session_key = [0u8; 32];
@@ -259,12 +272,18 @@ impl KeyExchange {
     }
 
     /// Create authentication MAC for AuthResponse
-    fn create_auth_mac(&self, our_eph_pk: &[u8; 32], peer_eph_pk: &[u8; 32]) -> Result<Vec<u8>, &'static str> {
-        let session_key = self.session_key.as_ref()
+    fn create_auth_mac(
+        &self,
+        our_eph_pk: &[u8; 32],
+        peer_eph_pk: &[u8; 32],
+    ) -> Result<Vec<u8>, &'static str> {
+        let session_key = self
+            .session_key
+            .as_ref()
             .ok_or("Session key not computed")?;
-        
-        let mut mac = HmacSha256::new_from_slice(session_key)
-            .expect("HMAC can take key of any size");
+
+        let mut mac =
+            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
         mac.update(our_eph_pk);
         mac.update(peer_eph_pk);
         mac.update(b"responder_auth");
@@ -277,15 +296,16 @@ impl KeyExchange {
         auth_response: &KeyExchangeMessage,
     ) -> Result<KeyExchangeMessage, &'static str> {
         let (peer_eph_pk_hex, auth_mac_hex) = match auth_response {
-            KeyExchangeMessage::AuthResponse { ephemeral_pk, auth_mac } => {
-                (ephemeral_pk, auth_mac)
-            }
+            KeyExchangeMessage::AuthResponse {
+                ephemeral_pk,
+                auth_mac,
+            } => (ephemeral_pk, auth_mac),
             _ => return Err("Expected AuthResponse message"),
         };
 
         // Parse peer's ephemeral public key
-        let peer_eph_pk_bytes = hex::decode(peer_eph_pk_hex)
-            .map_err(|_| "Invalid hex in ephemeral_pk")?;
+        let peer_eph_pk_bytes =
+            hex::decode(peer_eph_pk_hex).map_err(|_| "Invalid hex in ephemeral_pk")?;
         if peer_eph_pk_bytes.len() != 32 {
             return Err("Invalid ephemeral public key length");
         }
@@ -300,13 +320,13 @@ impl KeyExchange {
         self.compute_session_key()?;
 
         // Verify auth MAC
-        let auth_mac = hex::decode(auth_mac_hex)
-            .map_err(|_| "Invalid hex in auth_mac")?;
-        
-        let our_eph_pk = self.ephemeral_public
+        let auth_mac = hex::decode(auth_mac_hex).map_err(|_| "Invalid hex in auth_mac")?;
+
+        let our_eph_pk = self
+            .ephemeral_public
             .map(|pk| pk.to_bytes())
             .ok_or("No ephemeral public key")?;
-        
+
         self.verify_auth_mac(&pk_array, &our_eph_pk, &auth_mac)?;
 
         // Derive full encryption key
@@ -323,29 +343,43 @@ impl KeyExchange {
     }
 
     /// Verify auth MAC from responder
-    fn verify_auth_mac(&self, peer_eph_pk: &[u8; 32], our_eph_pk: &[u8; 32], mac_bytes: &[u8]) -> Result<(), &'static str> {
-        let session_key = self.session_key.as_ref()
+    fn verify_auth_mac(
+        &self,
+        peer_eph_pk: &[u8; 32],
+        our_eph_pk: &[u8; 32],
+        mac_bytes: &[u8],
+    ) -> Result<(), &'static str> {
+        let session_key = self
+            .session_key
+            .as_ref()
             .ok_or("Session key not computed")?;
-        
-        let mut mac = HmacSha256::new_from_slice(session_key)
-            .expect("HMAC can take key of any size");
-        mac.update(peer_eph_pk);  // Their ephemeral (in their message)
-        mac.update(our_eph_pk);   // Our ephemeral
+
+        let mut mac =
+            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
+        mac.update(peer_eph_pk); // Their ephemeral (in their message)
+        mac.update(our_eph_pk); // Our ephemeral
         mac.update(b"responder_auth");
-        
-        mac.verify_slice(mac_bytes)
-            .map_err(|_| "Auth MAC verification failed - responder doesn't have correct session key")?;
-        
+
+        mac.verify_slice(mac_bytes).map_err(|_| {
+            "Auth MAC verification failed - responder doesn't have correct session key"
+        })?;
+
         Ok(())
     }
 
     /// Create key confirmation MAC
-    fn create_confirm_mac(&self, our_eph_pk: &[u8; 32], peer_eph_pk: &[u8; 32]) -> Result<Vec<u8>, &'static str> {
-        let session_key = self.session_key.as_ref()
+    fn create_confirm_mac(
+        &self,
+        our_eph_pk: &[u8; 32],
+        peer_eph_pk: &[u8; 32],
+    ) -> Result<Vec<u8>, &'static str> {
+        let session_key = self
+            .session_key
+            .as_ref()
             .ok_or("Session key not computed")?;
-        
-        let mut mac = HmacSha256::new_from_slice(session_key)
-            .expect("HMAC can take key of any size");
+
+        let mut mac =
+            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
         mac.update(our_eph_pk);
         mac.update(peer_eph_pk);
         mac.update(b"initiator_confirm");
@@ -353,35 +387,42 @@ impl KeyExchange {
     }
 
     /// Process KeyConfirm (Responder finalizes, after Message 3)
-    pub fn process_key_confirm(&mut self, key_confirm: &KeyExchangeMessage) -> Result<(), &'static str> {
+    pub fn process_key_confirm(
+        &mut self,
+        key_confirm: &KeyExchangeMessage,
+    ) -> Result<(), &'static str> {
         let confirm_mac_hex = match key_confirm {
             KeyExchangeMessage::KeyConfirm { confirm_mac } => confirm_mac,
             _ => return Err("Expected KeyConfirm message"),
         };
 
-        let confirm_mac = hex::decode(confirm_mac_hex)
-            .map_err(|_| "Invalid hex in confirm_mac")?;
+        let confirm_mac = hex::decode(confirm_mac_hex).map_err(|_| "Invalid hex in confirm_mac")?;
 
-        let peer_eph_pk = self.peer_ephemeral_public
+        let peer_eph_pk = self
+            .peer_ephemeral_public
             .map(|pk| pk.to_bytes())
             .ok_or("No peer ephemeral public key")?;
-        
-        let our_eph_pk = self.ephemeral_public
+
+        let our_eph_pk = self
+            .ephemeral_public
             .map(|pk| pk.to_bytes())
             .ok_or("No ephemeral public key")?;
 
         // Verify confirmation MAC
-        let session_key = self.session_key.as_ref()
+        let session_key = self
+            .session_key
+            .as_ref()
             .ok_or("Session key not computed")?;
-        
-        let mut mac = HmacSha256::new_from_slice(session_key)
-            .expect("HMAC can take key of any size");
-        mac.update(&peer_eph_pk);  // Their ephemeral (initiator's)
-        mac.update(&our_eph_pk);   // Our ephemeral (responder's)
+
+        let mut mac =
+            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
+        mac.update(&peer_eph_pk); // Their ephemeral (initiator's)
+        mac.update(&our_eph_pk); // Our ephemeral (responder's)
         mac.update(b"initiator_confirm");
-        
-        mac.verify_slice(&confirm_mac)
-            .map_err(|_| "Key confirm verification failed - initiator doesn't have correct session key")?;
+
+        mac.verify_slice(&confirm_mac).map_err(|_| {
+            "Key confirm verification failed - initiator doesn't have correct session key"
+        })?;
 
         // Derive full encryption key
         self.derive_encryption_key();
@@ -436,7 +477,7 @@ impl KeyExchange {
 
     // ============ LEGACY COMPATIBILITY ============
     // Keep old methods for backward compatibility during transition
-    
+
     /// Legacy: Get our public key as bytes (for sending to peer)
     pub fn get_public_key_bytes(&self) -> Option<[u8; 32]> {
         self.ephemeral_public.map(|pk| pk.to_bytes())
@@ -459,11 +500,12 @@ impl KeyExchange {
         if let Some(secret) = self.ephemeral_secret.take() {
             let shared_secret = secret.diffie_hellman(&peer_public_key);
             self.shared_secret = Some(shared_secret);
-            
+
             // Derive session key for compatibility
             let hk = Hkdf::<Sha256>::new(Some(self.room_id.as_bytes()), shared_secret.as_bytes());
             let mut session_key = [0u8; 32];
-            hk.expand(b"zks-session-key-v1", &mut session_key).expect("HKDF expand failed");
+            hk.expand(b"zks-session-key-v1", &mut session_key)
+                .expect("HKDF expand failed");
             self.session_key = Some(session_key);
 
             // Derive encryption key using HKDF
@@ -482,7 +524,6 @@ impl KeyExchange {
 #[serde(tag = "type")]
 pub enum KeyExchangeMessage {
     // ============ NEW AUTHENTICATED PROTOCOL (v2) ============
-    
     /// Message 1: Initiator's ephemeral PK + encrypted identity proof
     #[serde(rename = "auth_init")]
     AuthInit {
@@ -490,22 +531,19 @@ pub enum KeyExchangeMessage {
         encrypted_identity: String,
         timestamp: u64,
     },
-    
+
     /// Message 2: Responder's ephemeral PK + authentication MAC
     #[serde(rename = "auth_response")]
     AuthResponse {
         ephemeral_pk: String,
         auth_mac: String,
     },
-    
+
     /// Message 3: Initiator's key confirmation
     #[serde(rename = "key_confirm")]
-    KeyConfirm {
-        confirm_mac: String,
-    },
+    KeyConfirm { confirm_mac: String },
 
     // ============ LEGACY PROTOCOL (v1) - for backward compat ============
-    
     /// Send our public key to peer (LEGACY)
     #[serde(rename = "key_exchange")]
     PublicKey {
@@ -526,26 +564,16 @@ pub enum KeyExchangeMessage {
     },
     /// DCUtR: Peer info for hole-punching
     #[serde(rename = "peer_info")]
-    PeerInfo {
-        peer_id: String,
-        addrs: Vec<String>,
-    },
+    PeerInfo { peer_id: String, addrs: Vec<String> },
     /// DCUtR: Request hole punch coordination
     #[serde(rename = "hole_punch_request")]
-    HolePunchRequest {
-        target_peer_id: String,
-    },
+    HolePunchRequest { target_peer_id: String },
     /// DCUtR: Accept hole punch
     #[serde(rename = "hole_punch_accept")]
-    HolePunchAccept {
-        peer_id: String,
-        addrs: Vec<String>,
-    },
+    HolePunchAccept { peer_id: String, addrs: Vec<String> },
     /// DCUtR: RTT sync
     #[serde(rename = "rtt_sync")]
-    RttSync {
-        timestamp_ms: u64,
-    },
+    RttSync { timestamp_ms: u64 },
 }
 
 impl KeyExchangeMessage {
@@ -611,21 +639,26 @@ mod tests {
         let mut exit_peer = KeyExchange::new("test-room");
 
         // Message 1: Client → Exit Peer (AuthInit)
-        let auth_init = client.create_auth_init().expect("Failed to create AuthInit");
+        let auth_init = client
+            .create_auth_init()
+            .expect("Failed to create AuthInit");
         println!("Message 1 (AuthInit): {}", auth_init.to_json());
 
         // Message 2: Exit Peer → Client (AuthResponse)
-        let auth_response = exit_peer.process_auth_init_and_respond(&auth_init)
+        let auth_response = exit_peer
+            .process_auth_init_and_respond(&auth_init)
             .expect("Failed to process AuthInit");
         println!("Message 2 (AuthResponse): {}", auth_response.to_json());
 
         // Message 3: Client → Exit Peer (KeyConfirm)
-        let key_confirm = client.process_auth_response_and_confirm(&auth_response)
+        let key_confirm = client
+            .process_auth_response_and_confirm(&auth_response)
             .expect("Failed to process AuthResponse");
         println!("Message 3 (KeyConfirm): {}", key_confirm.to_json());
 
         // Exit Peer verifies KeyConfirm
-        exit_peer.process_key_confirm(&key_confirm)
+        exit_peer
+            .process_key_confirm(&key_confirm)
             .expect("Failed to process KeyConfirm");
 
         // Both should have completed
@@ -638,7 +671,7 @@ mod tests {
 
         assert_eq!(client_key.len(), 1024 * 1024);
         assert_eq!(client_key, exit_key, "Keys should match!");
-        
+
         println!("✅ Authenticated key exchange successful!");
     }
 
@@ -647,8 +680,10 @@ mod tests {
         let mut client = KeyExchange::new("room-alice");
         let mut exit_peer = KeyExchange::new("room-bob"); // Different room!
 
-        let auth_init = client.create_auth_init().expect("Failed to create AuthInit");
-        
+        let auth_init = client
+            .create_auth_init()
+            .expect("Failed to create AuthInit");
+
         // Should fail because rooms don't match
         let result = exit_peer.process_auth_init_and_respond(&auth_init);
         assert!(result.is_err(), "Should fail with wrong room");
@@ -678,7 +713,7 @@ mod tests {
 
         assert_eq!(client_key.len(), 1024 * 1024);
         assert_eq!(client_key, exit_key);
-        
+
         println!("✅ Legacy key exchange still works!");
     }
 

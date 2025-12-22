@@ -323,69 +323,140 @@ impl P2PRelay {
             SplitStream<WebSocketStream<BoxedStream>>,
         ) = ws_stream.split();
 
-        // === X25519 Key Exchange ===
-        info!("🔑 Initiating X25519 key exchange...");
+        // === AUTHENTICATED 3-MESSAGE KEY EXCHANGE (Security Fix) ===
+        // This replaces the legacy unauthenticated 2-message protocol
+        // Protocol:
+        //   Client (Initiator):  AuthInit → AuthResponse → KeyConfirm
+        //   Exit Peer (Responder): AuthInit ← AuthResponse ← KeyConfirm
+        info!("🔑 Initiating authenticated key exchange...");
 
         let mut key_exchange = KeyExchange::new(room_id);
-        key_exchange.generate_keypair();
 
-        let our_pk = key_exchange
-            .get_public_key_bytes()
-            .ok_or("Failed to generate keypair")?;
+        match role {
+            PeerRole::Client => {
+                // === CLIENT (INITIATOR) FLOW ===
+                // Step 1: Create and send AuthInit
+                let auth_init = key_exchange
+                    .create_auth_init()
+                    .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
+                writer.send(Message::Text(auth_init.to_json())).await?;
+                debug!("Sent AuthInit message");
 
-        // Send our public key
-        let pk_msg = KeyExchangeMessage::new_public_key(&our_pk);
-        writer.send(Message::Text(pk_msg.to_json())).await?;
-        debug!("Sent our public key");
+                // Step 2: Wait for AuthResponse from Exit Peer
+                let auth_response = timeout(Duration::from_secs(120), async {
+                    while let Some(msg) = reader.next().await {
+                        match msg? {
+                            Message::Text(text) => {
+                                // Handle peer join - resend AuthInit
+                                if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
+                                    debug!("Peer joined, re-sending AuthInit");
+                                    let auth_init = key_exchange
+                                        .create_auth_init()
+                                        .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
+                                    writer.send(Message::Text(auth_init.to_json())).await?;
+                                    continue;
+                                }
 
-        // Wait for peer's public key (with timeout)
-        // 5 minute timeout to allow Exit Peer to wait for Client
-        let peer_pk = timeout(Duration::from_secs(300), async {
-            while let Some(msg) = reader.next().await {
-                match msg? {
-                    Message::Text(text) => {
-                        // Check if it's a PeerJoin event - re-send our public key
-                        if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
-                            debug!("Peer joined, re-sending public key");
-                            let pk_msg = KeyExchangeMessage::new_public_key(&our_pk);
-                            writer.send(Message::Text(pk_msg.to_json())).await?;
-                            continue;
-                        }
-
-                        // Check if it's a key exchange message
-                        if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                            if let Some(pk_bytes) = ke_msg.parse_public_key() {
-                                // RACE CONDITION FIX:
-                                // Always send our public key when we receive the peer's key.
-                                // This ensures that if we missed the 'peer_join' event (or if the peer
-                                // sent their key before we processed the join), the peer still gets our key.
-                                debug!("Received peer key, sending ours to ensure they have it");
-                                let pk_msg = KeyExchangeMessage::new_public_key(&our_pk);
-                                writer.send(Message::Text(pk_msg.to_json())).await?;
-
-                                return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(pk_bytes);
+                                // Check for AuthResponse
+                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                                    if let KeyExchangeMessage::AuthResponse { .. } = &ke_msg {
+                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                                            ke_msg,
+                                        );
+                                    }
+                                }
+                                debug!("Control message: {}", text);
                             }
+                            Message::Close(_) => {
+                                return Err("Connection closed during key exchange".into());
+                            }
+                            _ => {}
                         }
-                        // Other control messages (welcome, etc.) - ignore
-                        debug!("Relay control message: {}", text);
                     }
-                    Message::Binary(_) => {
-                        // Ignore binary before key exchange
-                    }
-                    Message::Close(_) => {
-                        return Err("Connection closed before key exchange".into());
-                    }
-                    _ => {}
-                }
-            }
-            Err("No key exchange message received".into())
-        })
-        .await
-        .map_err(|_| "Key exchange timeout")??;
+                    Err("No AuthResponse received".into())
+                })
+                .await
+                .map_err(|_| "AuthResponse timeout")??;
 
-        // Complete key exchange
-        key_exchange.receive_peer_public_key(&peer_pk)?;
-        info!("🔐 Key exchange complete! Encryption key derived.");
+                // Step 3: Process AuthResponse and send KeyConfirm
+                let key_confirm = key_exchange
+                    .process_auth_response_and_confirm(&auth_response)
+                    .map_err(|e| format!("Failed to process AuthResponse: {}", e))?;
+                writer.send(Message::Text(key_confirm.to_json())).await?;
+                debug!("Sent KeyConfirm message");
+
+                info!("🔐 Authenticated key exchange complete (Client)!");
+            }
+            PeerRole::ExitPeer => {
+                // === EXIT PEER (RESPONDER) FLOW ===
+                // Step 1: Wait for AuthInit from Client
+                let auth_init = timeout(Duration::from_secs(300), async {
+                    while let Some(msg) = reader.next().await {
+                        match msg? {
+                            Message::Text(text) => {
+                                // Check for AuthInit
+                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                                    if let KeyExchangeMessage::AuthInit { .. } = &ke_msg {
+                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                                            ke_msg,
+                                        );
+                                    }
+                                }
+                                debug!("Control message: {}", text);
+                            }
+                            Message::Close(_) => {
+                                return Err("Connection closed during key exchange".into());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err("No AuthInit received".into())
+                })
+                .await
+                .map_err(|_| "AuthInit timeout")??;
+
+                // Step 2: Process AuthInit and send AuthResponse
+                let auth_response = key_exchange
+                    .process_auth_init_and_respond(&auth_init)
+                    .map_err(|e| format!("Failed to process AuthInit: {}", e))?;
+                writer.send(Message::Text(auth_response.to_json())).await?;
+                debug!("Sent AuthResponse message");
+
+                // Step 3: Wait for KeyConfirm from Client
+                let key_confirm = timeout(Duration::from_secs(60), async {
+                    while let Some(msg) = reader.next().await {
+                        match msg? {
+                            Message::Text(text) => {
+                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                                    if let KeyExchangeMessage::KeyConfirm { .. } = &ke_msg {
+                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
+                                            ke_msg,
+                                        );
+                                    }
+                                }
+                            }
+                            Message::Close(_) => {
+                                return Err("Connection closed during key exchange".into());
+                            }
+                            _ => {}
+                        }
+                    }
+                    Err("No KeyConfirm received".into())
+                })
+                .await
+                .map_err(|_| "KeyConfirm timeout")??;
+
+                // Step 4: Verify KeyConfirm
+                key_exchange
+                    .process_key_confirm(&key_confirm)
+                    .map_err(|e| format!("Failed to verify KeyConfirm: {}", e))?;
+
+                info!("🔐 Authenticated key exchange complete (Exit Peer)!");
+            }
+        }
+
+        // Key exchange is now complete with mutual authentication
+        info!("✅ Mutual authentication verified - MITM protection active!");
 
         // Get the derived encryption key
         let encryption_key = key_exchange
