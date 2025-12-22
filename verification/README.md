@@ -7,7 +7,9 @@ This directory contains formal verification models for the ZKS protocol.
 | File | Tool | Scope |
 |------|------|-------|
 | `zks_handshake.pv` | ProVerif 2.05 | Full hybrid protocol (X25519 + Kyber768) |
+| `wasif_vernam_proof.pv` | ProVerif 2.05 | **Wasif-Vernam Quantum Security Proof** |
 | `zks_handshake.spthy` | Tamarin 1.10.0 | X25519 component only |
+| `WASIF_VERNAM_QUANTUM_PROOF.md` | Documentation | Formal security proof document |
 
 ## Verification Coverage
 
