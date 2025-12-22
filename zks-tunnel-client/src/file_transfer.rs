@@ -304,11 +304,10 @@ pub async fn run_send_file(
                 offset: req_offset,
             }) = serde_json::from_slice::<FileTransferMessage>(&data)
             {
-                    info!("Resuming transfer from offset {}", req_offset);
-                    offset = req_offset;
-                    waiting_for_resume = false;
-                }
-
+                info!("Resuming transfer from offset {}", req_offset);
+                offset = req_offset;
+                waiting_for_resume = false;
+            }
         }
     }
 

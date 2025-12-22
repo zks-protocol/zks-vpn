@@ -50,8 +50,6 @@ mod onion;
 mod entropy_tax;
 
 #[cfg(feature = "swarm")]
-
-
 #[cfg(feature = "swarm")]
 mod signaling;
 
