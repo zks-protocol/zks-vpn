@@ -65,7 +65,7 @@ jobs:
           
           echo ""
           echo "=== Dieharder Quick Test ==="
-          dieharder -a -g 201 -f entropy_sample.bin 2>&1 | head -50 | tee dieharder_output.txt || true
+          dieharder -g 201 -d 0 -f entropy_sample.bin 2>&1 | tee dieharder_output.txt || true
           
           # Check entropy quality
           ENTROPY=$(ent entropy_sample.bin | grep "Entropy" | awk '{print $3}')
