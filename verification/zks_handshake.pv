@@ -1,15 +1,15 @@
 (*
- * ZKS Protocol - ProVerif Formal Verification Model (ENHANCED)
+ * ZKS Protocol - ProVerif Formal Verification Model (ENHANCED v3)
  * 
  * Protocol: ZKS (Zero-Knowledge Swarm) Handshake with Mutual Authentication
  * Author: Md. Wasif Faisal, BRAC University
  * Date: December 2025
- * Version: 2.0 - Added mutual authentication to fix identity binding vulnerabilities
+ * Version: 3.0 - Fixed authentication queries with key confirmation
  * 
- * SECURITY FIXES:
- * 1. Added expected initiator public key verification on responder side
- * 2. Bound responder identity to both parties' public keys
- * 3. Added authentication proof before revealing responder identity
+ * SECURITY FIXES v3:
+ * 1. ResponderAccepted now requires key confirmation from initiator
+ * 2. 3-message handshake with proper authentication ordering
+ * 3. Authentication queries match actual protocol guarantees
  *)
 
 (* ============================================== *)
@@ -93,23 +93,30 @@ query attacker(responder_identity).
 
 (* Authentication events *)
 event InitiatorStarted(pkey, pkey).
-event ResponderAccepted(pkey, pkey).
+event InitiatorConfirmed(pkey, pkey, key).
+event ResponderSentReply(pkey, pkey, key).
+event ResponderAccepted(pkey, pkey, key).
 event SessionEstablished(pkey, pkey, key).
-event InitiatorVerified(pkey, pkey).
 
-(* Authentication queries *)
-query pkI: pkey, pkR: pkey; 
-  event(ResponderAccepted(pkI, pkR)) ==> event(InitiatorStarted(pkI, pkR)).
+(* Authentication queries - FIXED: match actual protocol semantics *)
+(* Query 1: Responder accepts only after receiving valid key confirmation *)
+query pkI: pkey, pkR: pkey, k: key; 
+  event(ResponderAccepted(pkI, pkR, k)) ==> event(InitiatorConfirmed(pkI, pkR, k)).
 
+(* Query 2: Key confirmation requires initiator to have started *)
+query pkI: pkey, pkR: pkey, k: key;
+  event(InitiatorConfirmed(pkI, pkR, k)) ==> event(InitiatorStarted(pkI, pkR)).
+
+(* Query 3: Session establishment implies initiator started *)
 query pkI: pkey, pkR: pkey, k: key;
   inj-event(SessionEstablished(pkI, pkR, k)) ==> inj-event(InitiatorStarted(pkI, pkR)).
 
 (* ============================================== *)
-(*     ZKS HANDSHAKE PROTOCOL (ENHANCED)          *)
+(*     ZKS HANDSHAKE PROTOCOL (3-MESSAGE)         *)
 (* ============================================== *)
 
 (*
- * SECURITY FIX: Mutual Authentication Protocol
+ * SECURITY FIX v3: 3-Message Protocol with Key Confirmation
  * 
  * Message 1: Initiator -> Responder
  * +--------+------------+-------------+------------------+
@@ -123,8 +130,11 @@ query pkI: pkey, pkR: pkey, k: key;
  * | 0x02   | X25519(32) | (1088 bytes)| Identity + Auth Proof   |
  * +--------+------------+-------------+-------------------------+
  *
- * The key fix is that the responder only reveals identity AFTER
- * verifying the initiator's identity matches expected keys.
+ * Message 3: Initiator -> Responder (KEY CONFIRMATION)
+ * +--------+---------------------------------------------------+
+ * | Type   | HMAC(session_key, "initiator_confirmed")          |
+ * | 0x03   | Proves initiator has skI and computed session key |
+ * +--------+---------------------------------------------------+
  *)
 
 let Initiator(skI: skey, pkI: pkey, pkR: pkey) =
@@ -154,11 +164,10 @@ let Initiator(skI: skey, pkI: pkey, pkR: pkey) =
   (* Derive shared secrets *)
   let dh1 = x25519(eiX, ErX) in
   let dh2 = x25519(eiX, pkR) in
-  let dh3 = x25519(skI, ErX) in
+  let dh3 = x25519(skI, ErX) in  (* CRITICAL: Uses initiator's long-term key *)
   let ss_kyber = kyber_ss(eiK, kyber_ct) in
   
-  (* Master secret: HKDF(DH1 || DH2 || DH3 || Kyber_SS || pkI || pkR) *)
-  (* SECURITY FIX: Include both public keys in context to bind identity *)
+  (* Master secret: includes both identities *)
   let master_key = hkdf3(dh1, dh2, dh3, ss_kyber, (EiX, ErX, pkI, pkR)) in
   
   (* Verify authentication proof from responder *)
@@ -168,6 +177,11 @@ let Initiator(skI: skey, pkI: pkey, pkR: pkey) =
   (* Derive transport keys *)
   let t_send = hkdf(master_key, dh1, (pkI, pkR, EiX, ErX)) in
   let t_recv = hkdf(master_key, dh2, (pkR, pkI, ErX, EiX)) in
+  
+  (* Send Message 3: Key confirmation *)
+  let key_confirm = hmac((EiX, ErX, pkI, pkR), master_key) in
+  event InitiatorConfirmed(pkI, pkR, master_key);
+  out(c, key_confirm);
   
   (* Session established after mutual verification *)
   event SessionEstablished(pkI, pkR, master_key);
@@ -196,12 +210,8 @@ let Responder(skR: skey, pkR: pkey, expected_pkI: pkey) =
   (* Decrypt initiator's identity *)
   let (pkI: pkey, ts: bitstring, id: bitstring) = aead_decrypt(encrypted_static, k_dec1, n1) in
   
-  (* SECURITY FIX: Verify initiator is from expected set *)
-  (* This check ensures the responder only responds to authorized initiators *)
+  (* Verify initiator is from expected set *)
   if pkI = expected_pkI then
-  
-  (* Signal: Initiator has been verified *)
-  event InitiatorVerified(pkI, pkR);
   
   (* Generate ephemeral keys *)
   new erX: skey;
@@ -214,30 +224,37 @@ let Responder(skR: skey, pkR: pkey, expected_pkI: pkey) =
   (* Derive shared secrets *)
   let dh1 = x25519(erX, EiX) in
   let dh2 = x25519(skR, EiX) in
-  let dh3 = x25519(erX, pkI) in
+  let dh3 = x25519(erX, pkI) in  (* Uses initiator's claimed public key *)
   
-  (* Master secret - SECURITY FIX: Include both identities in context *)
+  (* Master secret - includes both identities *)
   let master_key = hkdf3(dh1, dh2, dh3, ss_kyber, (EiX, ErX, pkI, pkR)) in
   
-  (* SECURITY FIX: Create authentication proof BEFORE encrypting identity *)
-  (* This binds the responder's identity to the handshake transcript *)
+  (* Create authentication proof *)
   let auth_proof = hmac((ErX, EiX, pkR, pkI), master_key) in
   
   (* Derive transport keys *)
   let t_recv = hkdf(master_key, dh1, (pkI, pkR, EiX, ErX)) in
   let t_send = hkdf(master_key, dh2, (pkR, pkI, ErX, EiX)) in
   
-  (* SECURITY FIX: Encrypt responder identity with key that includes both identities *)
+  (* Encrypt responder identity *)
   new n2: nonce;
   let encrypted_resp = aead_encrypt(responder_identity, master_key, n2) in
   
-  (* Authentication: Responder accepts verified initiator *)
-  event ResponderAccepted(pkI, pkR);
+  (* Signal: Responder sent reply (but not yet accepted) *)
+  event ResponderSentReply(pkI, pkR, master_key);
   
-  (* Send Message 2 with authentication proof *)
+  (* Send Message 2 *)
   out(c, (ErX, kyber_ct, encrypted_resp, n2, auth_proof));
   
-  (* Session established *)
+  (* Receive Message 3: Key confirmation from initiator *)
+  in(c, key_confirm: bitstring);
+  
+  (* Verify key confirmation - proves initiator has skI *)
+  let expected_confirm = hmac((EiX, ErX, pkI, pkR), master_key) in
+  if key_confirm = expected_confirm then
+  
+  (* NOW responder can trust initiator has skI *)
+  event ResponderAccepted(pkI, pkR, master_key);
   event SessionEstablished(pkI, pkR, master_key);
   
   (* Receive encrypted data *)
@@ -260,7 +277,6 @@ process
   out(c, pkR);
   
   (* Run protocol instances *)
-  (* SECURITY FIX: Responder now expects specific initiator key *)
   (
     Initiator(skI, pkI, pkR) | 
     Responder(skR, pkR, pkI) |
@@ -269,3 +285,4 @@ process
     !Initiator(skI, pkI, pkR) |
     !Responder(skR, pkR, pkI)
   )
+

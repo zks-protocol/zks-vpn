@@ -66,10 +66,10 @@ pub fn ct_double_xor(dst: &mut [u8], src: &[u8], k_local: &[u8; 32], k_remote: &
 /// In-place double-key XOR
 #[inline]
 pub fn ct_double_xor_inplace(data: &mut [u8], k_local: &[u8; 32], k_remote: &[u8; 32]) {
-    for i in 0..data.len() {
+    for (i, byte) in data.iter_mut().enumerate() {
         let idx = i % 32;
         let key_byte = k_local[idx] ^ k_remote[idx];
-        data[i] ^= key_byte;
+        *byte ^= key_byte;
     }
 }
 

@@ -142,7 +142,7 @@ impl MultiQueueTun {
         // Open /dev/net/tun
         let fd = unsafe {
             libc::open(
-                b"/dev/net/tun\0".as_ptr() as *const libc::c_char,
+                c"/dev/net/tun".as_ptr(),
                 libc::O_RDWR,
             )
         };
