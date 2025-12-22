@@ -502,7 +502,9 @@ impl KeyExchange {
             self.shared_secret = Some(shared_secret);
 
             // Derive session key for compatibility
-            let hk = Hkdf::<Sha256>::new(Some(self.room_id.as_bytes()), shared_secret.as_bytes());
+            let shared_secret_ref = self.shared_secret.as_ref().unwrap();
+            let hk =
+                Hkdf::<Sha256>::new(Some(self.room_id.as_bytes()), shared_secret_ref.as_bytes());
             let mut session_key = [0u8; 32];
             hk.expand(b"zks-session-key-v1", &mut session_key)
                 .expect("HKDF expand failed");
