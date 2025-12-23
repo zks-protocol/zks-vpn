@@ -76,14 +76,10 @@ async fn handle_entropy(req: Request) -> Result<Response> {
         wasm_bindgen_futures::spawn_local(async move {
             let mut event_stream = server.events().expect("could not open stream");
             while let Some(event) = event_stream.next().await {
-                match event.expect("received error in websocket") {
-                    // Echo back ACK
-                    worker::WebsocketEvent::Message(msg) => {
-                        if let Some(text) = msg.text() {
-                            let _ = server.send_with_str(&format!("ACK: {}", text));
-                        }
+                if let worker::WebsocketEvent::Message(msg) = event.expect("received error in websocket") {
+                    if let Some(text) = msg.text() {
+                        let _ = server.send_with_str(&format!("ACK: {}", text));
                     }
-                    _ => {}
                 }
             }
         });
