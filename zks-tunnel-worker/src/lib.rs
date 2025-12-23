@@ -9,6 +9,7 @@
 //! [Client] --WebSocket(ZKS)--> [Worker] --TCP--> [Internet]
 
 use worker::*;
+use futures::StreamExt;
 
 mod tunnel_session;
 pub use tunnel_session::TunnelSession;
