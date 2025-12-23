@@ -80,7 +80,7 @@ async fn handle_entropy(req: Request) -> Result<Response> {
                     event.expect("received error in websocket")
                 {
                     if let Some(text) = msg.text() {
-                        let _ = server.send_with_str(&format!("ACK: {}", text));
+                        let _ = server.send_with_str(format!("ACK: {}", text));
                     }
                 }
             }
