@@ -54,15 +54,19 @@ pub struct WasifVernam {
 }
 
 impl WasifVernam {
-    /// Create new Wasif Vernam from a 32-byte shared secret
-    pub fn new(shared_secret: [u8; 32]) -> Self {
+    /// Create new Wasif Vernam from a 32-byte shared secret and remote key
+    ///
+    /// # Arguments
+    /// * `shared_secret` - 32-byte key from key exchange (for ChaCha20-Poly1305)
+    /// * `remote_key` - Remote entropy from Swarm (for XOR layer, can be empty)
+    pub fn new(shared_secret: [u8; 32], remote_key: Vec<u8>) -> Self {
         let key = Key::from_slice(&shared_secret);
         let cipher = ChaCha20Poly1305::new(key);
 
         Self {
             cipher,
             nonce_counter: AtomicU64::new(0),
-            remote_key: Vec::new(),
+            remote_key,
         }
     }
 
@@ -258,6 +262,66 @@ pub struct P2PRelay {
     pub shared_secret: [u8; 32],
 }
 
+/// Discover peers from relay messages (welcome + peer_join events)
+/// 
+/// Listens to the WebSocket stream for a specified duration to collect peer IDs
+/// from welcome and peer_join messages sent by the relay.
+async fn discover_peers_from_relay<S>(
+    reader: &mut SplitStream<WebSocketStream<S>>,
+    timeout_duration: Duration,
+) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    use tokio::time::timeout;
+    
+    let mut peer_ids = Vec::new();
+    
+    // Listen for messages for the specified duration
+    let discovery_result = timeout(timeout_duration, async {
+        while let Some(msg) = reader.next().await {
+            match msg? {
+                Message::Text(text) => {
+                    // Try to parse as JSON to extract peer information
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // Check for welcome message
+                        if json["type"] == "welcome" {
+                            debug!("Received welcome message: {}", text);
+                            // Welcome doesn't contain peer list in current implementation
+                            continue;
+                        }
+                        
+                        // Check for peer_join message
+                        if json["type"] == "peer_join" {
+                            if let Some(peer_id) = json["peer_id"].as_str() {
+                                info!("Discovered peer: {}", peer_id);
+                                peer_ids.push(peer_id.to_string());
+                            }
+                        }
+                    }
+                }
+                Message::Close(_) => {
+                    return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
+                        "Connection closed during peer discovery".into()
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    }).await;
+    
+    // Timeout is expected - we're just collecting peers for a fixed duration
+    match discovery_result {
+        Ok(_) | Err(_) => {
+            info!("Peer discovery complete: found {} peers", peer_ids.len());
+            Ok(peer_ids)
+        }
+    }
+}
+
+
+
 #[allow(dead_code)]
 impl P2PRelay {
     /// Connect to relay and establish P2P session with key exchange
@@ -293,7 +357,34 @@ impl P2PRelay {
                 Box::new(socks_stream)
             }
         } else {
-            let tcp_stream = TcpStream::connect((host, port)).await?;
+            // Explicit DNS resolution with retry logic
+            info!("Resolving hostname: {}:{}", host, port);
+            let addr_str = format!("{}:{}", host, port);
+            
+            let mut attempts = 0;
+            let socket_addr = loop {
+                match tokio::net::lookup_host(&addr_str).await {
+                    Ok(mut addrs) => {
+                        if let Some(addr) = addrs.next() {
+                            info!("Resolved {} to {}", host, addr);
+                            break addr;
+                        } else {
+                            return Err(format!("No addresses found for {}", host).into());
+                        }
+                    }
+                    Err(e) if attempts < 3 => {
+                        attempts += 1;
+                        warn!("DNS lookup attempt {} failed for {}: {}. Retrying in 2s...", attempts, host, e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    }
+                    Err(e) => {
+                        return Err(format!("Failed to resolve {} after {} attempts: {}", host, attempts, e).into());
+                    }
+                }
+            };
+            
+            info!("Connecting to {}...", socket_addr);
+            let tcp_stream = TcpStream::connect(socket_addr).await?;
 
             if scheme == "wss" {
                 let connector = native_tls::TlsConnector::new()?;
@@ -471,7 +562,34 @@ impl P2PRelay {
         if encryption_key.len() >= 32 {
             shared_secret.copy_from_slice(&encryption_key[0..32]);
         }
-        let mut keys = WasifVernam::new(shared_secret);
+        
+        // === Swarm Entropy Collection ===
+        // Collect entropy from peers in room for information-theoretic security
+        info!("🎲 Discovering peers for Swarm Entropy collection...");
+        
+        // Discover peers from relay messages (welcome + peer_join events)
+        let peer_ids = discover_peers_from_relay(&mut reader, Duration::from_secs(2)).await?;
+        
+        let remote_key = if !peer_ids.is_empty() {
+            use crate::swarm_entropy_collection::collect_swarm_entropy_via_relay;
+            
+            info!("🎲 Starting Swarm Entropy collection with {} peers...", peer_ids.len());
+            match collect_swarm_entropy_via_relay(&mut writer, &mut reader, room_id, peer_ids).await {
+                Ok(key) => {
+                    info!("✅ Swarm Entropy collected! Information-theoretic security ACTIVE");
+                    key
+                }
+                Err(e) => {
+                    warn!("⚠️  Failed to collect Swarm Entropy: {}. Falling back to ChaCha20-only", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            info!("ℹ️  No peers in room yet, using ChaCha20-only (will upgrade when peers join)");
+            Vec::new()
+        };
+        
+        let mut keys = WasifVernam::new(shared_secret, remote_key);
 
         // === Swarm Entropy Synchronization ===
         // Client fetches entropy and shares with Exit Peer to ensure both have same key
