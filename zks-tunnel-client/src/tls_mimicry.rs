@@ -13,7 +13,6 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// TLS content types
 #[allow(dead_code)]
-
 const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 0x16;
 #[allow(dead_code)]
 const TLS_CONTENT_TYPE_APPLICATION: u8 = 0x17;
@@ -38,6 +37,7 @@ pub struct TlsMimicryConfig {
     pub min_rate: f64,
 }
 
+#[allow(dead_code)]
 impl TlsMimicryConfig {
     /// Default configuration (balanced mode)
     pub fn default() -> Self {

@@ -71,7 +71,7 @@ impl EntropyTax {
 
         // Compute commitment (SHA256 hash)
         let mut hasher = Sha256::new();
-        hasher.update(&local_entropy);
+        hasher.update(local_entropy);
         let commitment: [u8; 32] = hasher.finalize().into();
 
         Self {
@@ -151,7 +151,7 @@ impl EntropyTax {
 
         // Verify commitment matches revealed entropy
         let mut hasher = Sha256::new();
-        hasher.update(&entropy);
+        hasher.update(entropy);
         let actual_commitment: [u8; 32] = hasher.finalize().into();
 
         if &actual_commitment != expected_commitment {
@@ -205,7 +205,7 @@ impl EntropyTax {
         all_entropies.sort_by(|a, b| a.0.cmp(&b.0));
 
         for (_, entropy) in all_entropies {
-            hasher.update(&entropy);
+            hasher.update(entropy);
         }
 
         // Add room_id for domain separation
@@ -218,7 +218,7 @@ impl EntropyTax {
         // HKDF with SHA256 has max output of 255 * 32 = 8160 bytes per call
         // So we use multiple HKDF expansions with different context
         let chunk_size: usize = 1024; // Safe size
-        let num_chunks = (REMOTE_KEY_SIZE + chunk_size - 1) / chunk_size;
+        let num_chunks = REMOTE_KEY_SIZE.div_ceil(chunk_size);
         let mut remote_key = Vec::with_capacity(REMOTE_KEY_SIZE);
 
         for i in 0..num_chunks {

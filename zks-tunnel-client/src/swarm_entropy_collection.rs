@@ -66,35 +66,31 @@ where
 
     while !entropy_tax.all_committed(&peer_ids) {
         if let Some(Ok(Message::Text(msg))) = reader.next().await {
-            if let Ok(event) = EntropyEvent::from_json(&msg) {
-                match event {
-                    EntropyEvent::Commit {
-                        peer_id,
-                        commitment: commit_hex,
-                    } => {
-                        if peer_ids.contains(&peer_id) && !committed_peers.contains(&peer_id) {
-                            let commit_bytes = hex::decode(&commit_hex)
-                                .map_err(|e| format!("Invalid commitment hex: {}", e))?;
+            if let Ok(EntropyEvent::Commit {
+                peer_id,
+                commitment: commit_hex,
+            }) = EntropyEvent::from_json(&msg)
+            {
+                if peer_ids.contains(&peer_id) && !committed_peers.contains(&peer_id) {
+                    let commit_bytes = hex::decode(&commit_hex)
+                        .map_err(|e| format!("Invalid commitment hex: {}", e))?;
 
-                            if commit_bytes.len() != 32 {
-                                return Err(format!("Invalid commitment size from {}", peer_id));
-                            }
-
-                            let mut commitment = [0u8; 32];
-                            commitment.copy_from_slice(&commit_bytes);
-
-                            entropy_tax.add_peer_commitment(peer_id.clone(), commitment)?;
-                            committed_peers.insert(peer_id.clone());
-
-                            debug!(
-                                "✅ Received commitment from {} ({}/{})",
-                                peer_id,
-                                committed_peers.len(),
-                                peer_ids.len()
-                            );
-                        }
+                    if commit_bytes.len() != 32 {
+                        return Err(format!("Invalid commitment size from {}", peer_id));
                     }
-                    _ => {} // Ignore other events during commit phase
+
+                    let mut commitment = [0u8; 32];
+                    commitment.copy_from_slice(&commit_bytes);
+
+                    entropy_tax.add_peer_commitment(peer_id.clone(), commitment)?;
+                    committed_peers.insert(peer_id.clone());
+
+                    debug!(
+                        "✅ Received commitment from {} ({}/{})",
+                        peer_id,
+                        committed_peers.len(),
+                        peer_ids.len()
+                    );
                 }
             }
         }
@@ -121,35 +117,31 @@ where
 
     while !entropy_tax.all_revealed(&peer_ids) {
         if let Some(Ok(Message::Text(msg))) = reader.next().await {
-            if let Ok(event) = EntropyEvent::from_json(&msg) {
-                match event {
-                    EntropyEvent::Reveal {
-                        peer_id,
-                        entropy: entropy_hex,
-                    } => {
-                        if peer_ids.contains(&peer_id) && !revealed_peers.contains(&peer_id) {
-                            let entropy_bytes = hex::decode(&entropy_hex)
-                                .map_err(|e| format!("Invalid entropy hex: {}", e))?;
+            if let Ok(EntropyEvent::Reveal {
+                peer_id,
+                entropy: entropy_hex,
+            }) = EntropyEvent::from_json(&msg)
+            {
+                if peer_ids.contains(&peer_id) && !revealed_peers.contains(&peer_id) {
+                    let entropy_bytes = hex::decode(&entropy_hex)
+                        .map_err(|e| format!("Invalid entropy hex: {}", e))?;
 
-                            if entropy_bytes.len() != 32 {
-                                return Err(format!("Invalid entropy size from {}", peer_id));
-                            }
-
-                            let mut entropy = [0u8; 32];
-                            entropy.copy_from_slice(&entropy_bytes);
-
-                            entropy_tax.add_peer_entropy(peer_id.clone(), entropy)?;
-                            revealed_peers.insert(peer_id.clone());
-
-                            debug!(
-                                "✅ Received entropy from {} ({}/{})",
-                                peer_id,
-                                revealed_peers.len(),
-                                peer_ids.len()
-                            );
-                        }
+                    if entropy_bytes.len() != 32 {
+                        return Err(format!("Invalid entropy size from {}", peer_id));
                     }
-                    _ => {} // Ignore other events during reveal phase
+
+                    let mut entropy = [0u8; 32];
+                    entropy.copy_from_slice(&entropy_bytes);
+
+                    entropy_tax.add_peer_entropy(peer_id.clone(), entropy)?;
+                    revealed_peers.insert(peer_id.clone());
+
+                    debug!(
+                        "✅ Received entropy from {} ({}/{})",
+                        peer_id,
+                        revealed_peers.len(),
+                        peer_ids.len()
+                    );
                 }
             }
         }
