@@ -46,8 +46,13 @@ mod p2p_swarm;
 #[cfg(feature = "swarm")]
 mod onion;
 
-#[cfg(feature = "swarm")]
+mod replay_protection;
+mod key_rotation;
 mod entropy_tax;
+mod entropy_events;
+pub mod swarm_entropy_collection;
+mod traffic_shaping;
+mod tls_mimicry;
 
 #[cfg(feature = "swarm")]
 #[cfg(feature = "swarm")]

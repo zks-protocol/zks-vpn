@@ -148,7 +148,9 @@ impl TunnelClient {
                                     body,
                                 } => {
                                     let tx_opt = {
-                                        let mut pending = pending_http_clone.lock().unwrap();
+                                        let mut pending = pending_http_clone
+                                            .lock()
+                                            .expect("HTTP pending requests mutex poisoned");
                                         pending.remove(&stream_id)
                                     };
                                     if let Some(tx) = tx_opt {
@@ -369,7 +371,9 @@ impl TunnelClient {
         let (tx, rx) = mpsc::channel(1);
 
         // Use sync mutex - safe to call from any context
-        let mut pending = self.pending_http_requests.lock().unwrap();
+        let mut pending = self.pending_http_requests
+            .lock()
+            .expect("HTTP pending requests mutex poisoned");
         pending.insert(stream_id, tx);
 
         Ok(rx)

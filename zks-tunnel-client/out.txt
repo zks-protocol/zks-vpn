@@ -1,0 +1,112 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   D:\BuzzU\ZKS_VPN\zks-tunnel-relay\Cargo.toml
+workspace: D:\BuzzU\ZKS_VPN\Cargo.toml
+    Checking zks-tunnel-client v0.1.0 (D:\BuzzU\ZKS_VPN\zks-tunnel-client)
+warning: unused import: `std::net::SocketAddr`
+  --> zks-tunnel-client\src\exit_node_udp.rs:15:5
+   |
+15 | use std::net::SocketAddr;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::sync::Arc`
+  --> zks-tunnel-client\src\exit_node_udp.rs:16:5
+   |
+16 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::net::UdpSocket`
+  --> zks-tunnel-client\src\exit_node_udp.rs:17:5
+   |
+17 | use tokio::net::UdpSocket;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::sync::RwLock`
+  --> zks-tunnel-client\src\exit_node_udp.rs:18:5
+   |
+18 | use tokio::sync::RwLock;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `debug`, `error`, and `info`
+  --> zks-tunnel-client\src\exit_node_udp.rs:19:15
+   |
+19 | use tracing::{debug, error, info};
+   |               ^^^^^  ^^^^^  ^^^^
+
+warning: unused imports: `AsyncReadExt` and `AsyncWriteExt`
+ --> zks-tunnel-client\src\hybrid_data.rs:7:17
+  |
+7 | use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  |                 ^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused imports: `TcpListener` and `TcpStream`
+ --> zks-tunnel-client\src\hybrid_data.rs:8:18
+  |
+8 | use tokio::net::{TcpListener, TcpStream};
+  |                  ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused imports: `debug`, `error`, and `info`
+  --> zks-tunnel-client\src\hybrid_data.rs:10:15
+   |
+10 | use tracing::{debug, error, info, warn};
+   |               ^^^^^  ^^^^^  ^^^^
+
+warning: unused import: `zks_tunnel_proto::TunnelMessage`
+  --> zks-tunnel-client\src\file_transfer.rs:22:5
+   |
+22 | use zks_tunnel_proto::TunnelMessage;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `error`
+  --> zks-tunnel-client\src\file_transfer.rs:23:21
+   |
+23 | use tracing::{info, error};
+   |                     ^^^^^
+
+error[E0599]: no method named `seek` found for struct `tokio::fs::File` in the current scope
+  --> zks-tunnel-client\src\file_transfer.rs:77:14
+   |
+77 |         file.seek(std::io::SeekFrom::Start(offset)).await?;
+   |              ^^^^ method not found in `tokio::fs::File`
+   |
+  ::: C:\Users\Administrator\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.48.0\src\io\util\async_seek_ext.rs:66:12
+   |
+66 |         fn seek(&mut self, pos: SeekFrom) -> Seek<'_, Self>
+   |            ---- the method is available for `tokio::fs::File` here
+   |
+   = help: items from traits can only be used if the trait is in scope
+help: trait `AsyncSeekExt` which provides `seek` is implemented but not in scope; perhaps you want to import it
+   |
+ 9 + use tokio::io::AsyncSeekExt;
+   |
+
+error[E0599]: no method named `seek` found for mutable reference `&mut tokio::fs::File` in the current scope
+   --> zks-tunnel-client\src\file_transfer.rs:129:18
+    |
+129 |             file.seek(std::io::SeekFrom::Start(offset)).await?;
+    |                  ^^^^ method not found in `&mut tokio::fs::File`
+    |
+    = help: items from traits can only be used if the trait is in scope
+help: trait `AsyncSeekExt` which provides `seek` is implemented but not in scope; perhaps you want to import it
+    |
+  9 + use tokio::io::AsyncSeekExt;
+    |
+
+warning: unused variable: `ct_bytes`
+   --> zks-tunnel-client\src\key_exchange.rs:396:18
+    |
+396 |              let ct_bytes = hex::decode(ct_hex).map_err(|_| "Invalid hex in kyber_ct")?;
+    |                  ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_ct_bytes`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `room_id`
+   --> zks-tunnel-client\src\main.rs:273:17
+    |
+273 |             let room_id = args.room.clone().unwrap_or_else(|| "default".to_string());
+    |                 ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_room_id`
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `zks-tunnel-client` (bin "zks-vpn") generated 12 warnings
+error: could not compile `zks-tunnel-client` (bin "zks-vpn") due to 2 previous errors; 12 warnings emitted

@@ -15,6 +15,7 @@
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
 
 #[cfg(feature = "quantum")]
@@ -268,7 +269,8 @@ impl KeyExchange {
             let pk_array = ml_kem::array::Array::try_from(pk_bytes.as_slice())
                 .map_err(|_| "Invalid Kyber public key length")?;
             let pk = EncapsulationKey::<MlKem768Params>::from_bytes(&pk_array);
-            let (ct, ss) = pk.encapsulate(&mut OsRng).unwrap();
+            let (ct, ss) = pk.encapsulate(&mut OsRng)
+                .map_err(|_| "Kyber encapsulation failed")?;
             self.kyber_shared_secret = Some(ss);
             self.peer_kyber_public = Some(pk);
             let ct_bytes = ct.as_slice();
@@ -406,12 +408,12 @@ impl KeyExchange {
         // Handle Kyber decapsulation
         #[cfg(feature = "quantum")]
         if let Some(ct_hex) = kyber_ct_hex {
-            let _ct_bytes = hex::decode(ct_hex).map_err(|_| "Invalid hex in kyber_ct")?;
             let ct_bytes = hex::decode(ct_hex).map_err(|_| "Invalid hex in kyber_ct")?;
             let ct = Ciphertext::<MlKem768>::try_from(ct_bytes.as_slice())
                 .map_err(|_| "Invalid Kyber ciphertext")?;
             let sk = self.kyber_secret.as_ref().ok_or("No Kyber secret key")?;
-            let ss = sk.decapsulate(&ct).unwrap();
+            let ss = sk.decapsulate(&ct)
+                .map_err(|_| "Kyber decapsulation failed")?;
             self.kyber_shared_secret = Some(ss);
         }
 
@@ -441,7 +443,7 @@ impl KeyExchange {
         })
     }
 
-    /// Verify auth MAC from responder
+    /// Verify auth MAC from responder (CONSTANT-TIME)
     fn verify_auth_mac(
         &self,
         peer_eph_pk: &[u8; 32],
@@ -459,11 +461,14 @@ impl KeyExchange {
         mac.update(our_eph_pk); // Our ephemeral
         mac.update(b"responder_auth");
 
-        mac.verify_slice(mac_bytes).map_err(|_| {
-            "Auth MAC verification failed - responder doesn't have correct session key"
-        })?;
-
-        Ok(())
+        let expected_mac = mac.finalize().into_bytes();
+        
+        // SECURITY: Use constant-time comparison to prevent timing attacks
+        if expected_mac.ct_eq(mac_bytes).into() {
+            Ok(())
+        } else {
+            Err("Auth MAC verification failed - responder doesn't have correct session key")
+        }
     }
 
     /// Create key confirmation MAC
@@ -499,15 +504,16 @@ impl KeyExchange {
 
         let peer_eph_pk = self
             .peer_ephemeral_public
-            .map(|pk| pk.to_bytes())
+            .as_ref()
             .ok_or("No peer ephemeral public key")?;
-
         let our_eph_pk = self
             .ephemeral_public
-            .map(|pk| pk.to_bytes())
+            .as_ref()
             .ok_or("No ephemeral public key")?;
 
-        // Verify confirmation MAC
+        let peer_eph_pk_bytes = peer_eph_pk.to_bytes();
+        let our_eph_pk_bytes = our_eph_pk.to_bytes();
+
         let session_key = self
             .session_key
             .as_ref()
@@ -515,13 +521,17 @@ impl KeyExchange {
 
         let mut mac =
             HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
-        mac.update(&peer_eph_pk); // Their ephemeral (initiator's)
-        mac.update(&our_eph_pk); // Our ephemeral (responder's)
+        mac.update(&peer_eph_pk_bytes); // Their ephemeral
+        mac.update(&our_eph_pk_bytes); // Our ephemeral
         mac.update(b"initiator_confirm");
 
-        mac.verify_slice(&confirm_mac).map_err(|_| {
-            "Key confirm verification failed - initiator doesn't have correct session key"
-        })?;
+        let expected_mac = mac.finalize().into_bytes();
+        
+        // SECURITY: Use constant-time comparison to prevent timing attacks
+        let is_equal: bool = expected_mac.ct_eq(&confirm_mac[..]).into();
+        if !is_equal {
+            return Err("Key confirmation failed - initiator doesn't have correct session key");
+        }
 
         // Derive full encryption key
         self.derive_encryption_key();

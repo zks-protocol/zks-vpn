@@ -62,6 +62,11 @@ libp2p = { version = "0.54", features = ["dcutr", "relay", "identify", "noise", 
 ml-kem = { version = "0.2", optional = true }
 indicatif = "0.18.3"
 blake3 = "1.8.2"
+rand = "0.8"
+
+# Security: Constant-time operations and key zeroization
+subtle = "2.6"
+zeroize = { version = "1.8", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
 # Windows-specific: Wintun driver bindings
