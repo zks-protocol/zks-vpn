@@ -12,16 +12,83 @@ use widestring::WideCString;
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::ERROR_SUCCESS,
+    Foundation::{ERROR_SUCCESS, ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA},
     NetworkManagement::IpHelper::{
         CreateIpForwardEntry2, DeleteIpForwardEntry2, InitializeIpForwardEntry,
-        MIB_IPFORWARD_ROW2,
+        MIB_IPFORWARD_ROW2, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER,
+        GAA_FLAG_SKIP_FRIENDLY_NAME, ConvertInterfaceNameToLuidW,
     },
-    Networking::WinSock::{AF_INET, MIB_IPPROTO_NETMGMT, NlroManual, SOCKADDR_IN},
+    Networking::WinSock::{AF_INET, AF_UNSPEC, MIB_IPPROTO_NETMGMT, NlroManual, SOCKADDR_IN},
 };
 
 #[cfg(target_os = "windows")]
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Get TUN interface index by name pattern (e.g., "tun")
+#[cfg(target_os = "windows")]
+pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
+    unsafe {
+        const BUFFER_SIZE: usize = 15 * 1024;
+        let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
+        let mut buffer_size = buffer.len() as u32;
+        
+        let flags = GAA_FLAG_SKIP_ANYCAST 
+            | GAA_FLAG_SKIP_MULTICAST 
+            | GAA_FLAG_SKIP_DNS_SERVER 
+            | GAA_FLAG_SKIP_FRIENDLY_NAME;
+        
+        let status = GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+            &raw mut buffer_size,
+        );
+        
+        if status != ERROR_SUCCESS {
+            if status == ERROR_BUFFER_OVERFLOW {
+                buffer.resize(buffer_size as usize, 0);
+                let status = GetAdaptersAddresses(
+                    AF_UNSPEC as u32,
+                    flags,
+                    std::ptr::null_mut(),
+                    buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                    &raw mut buffer_size,
+                );
+                if status != ERROR_SUCCESS {
+                    return Err(format!("GetAdaptersAddresses failed: {}", status).into());
+                }
+            } else if status == ERROR_NO_DATA {
+                return Err("No network adapters found".into());
+            } else {
+                return Err(format!("GetAdaptersAddresses failed: {}", status).into());
+            }
+        }
+        
+        let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        while !adapter.is_null() {
+            let adapter_ref = &*adapter;
+            
+            // Get adapter name (FriendlyName would be null due to flag, use AdapterName)
+            if !adapter_ref.AdapterName.is_null() {
+                let adapter_name = std::ffi::CStr::from_ptr(adapter_ref.AdapterName)
+                    .to_string_lossy();
+                
+                // Check if adapter name contains the pattern (e.g., "tun")
+                if adapter_name.to_lowercase().contains(&name_pattern.to_lowercase()) {
+                    let index = adapter_ref.Anonymous1.Anonymous.IfIndex;
+                    info!("Found TUN adapter: {} (index: {})", adapter_name, index);
+                    return Ok(index);
+                }
+            }
+            
+            adapter = adapter_ref.Next;
+        }
+        
+        Err(format!("No adapter matching '{}' found", name_pattern).into())
+    }
+}
 
 /// Add a route via Win32 API
 #[cfg(target_os = "windows")]

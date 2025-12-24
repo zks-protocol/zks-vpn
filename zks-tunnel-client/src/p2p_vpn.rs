@@ -43,6 +43,13 @@ mod implementation {
     #[cfg(target_os = "linux")]
     use tokio::io::unix::AsyncFd;
 
+    // Platform-specific routing modules
+    #[cfg(target_os = "windows")]
+    use crate::windows_routing;
+    #[cfg(target_os = "linux")]
+    use crate::linux_routing;
+
+
     /// Abstract writer for TUN device (Single or Multi-Queue)
     #[derive(Clone)]
     pub enum TunDeviceWriter {
@@ -403,16 +410,27 @@ mod implementation {
             {
                 info!("Removing VPN routes...");
 
-                // Remove IPv4 split-tunnel routes
-                let _ = Command::new("route")
-                    .args(["delete", "0.0.0.0", "mask", "128.0.0.0"])
-                    .output();
-                let _ = Command::new("route")
-                    .args(["delete", "128.0.0.0", "mask", "128.0.0.0"])
-                    .output();
-                info!("✅ IPv4 VPN routes removed");
+                // Get TUN interface index for route deletion
+                if let Ok(tun_if_index) = windows_routing::get_tun_interface_index("tun") {
+                    let tun_ip = self.config.address;
 
-                // Remove IPv6 routes
+                    // Remove IPv4 split-tunnel routes using Win32 API
+                    let _ = windows_routing::delete_route(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        Ipv4Addr::new(128, 0, 0, 0),
+                        tun_ip,
+                        tun_if_index,
+                    );
+                    let _ = windows_routing::delete_route(
+                        Ipv4Addr::new(128, 0, 0, 0),
+                        Ipv4Addr::new(128, 0, 0, 0),
+                        tun_ip,
+                        tun_if_index,
+                    );
+                    info!("✅ IPv4 VPN routes removed via Win32 API");
+                }
+
+                // Remove IPv6 routes (still using netsh for simplicity)
                 let _ = Command::new("netsh")
                     .args(["interface", "ipv6", "delete", "route", "::/1"])
                     .output();
@@ -646,12 +664,24 @@ mod implementation {
                 {
                     info!("Setting up routes to capture traffic...");
 
+                    // Get TUN interface index using Win32 API
+                    let tun_if_index = match windows_routing::get_tun_interface_index("tun") {
+                        Ok(idx) => idx,
+                        Err(e) => {
+                            error!("Failed to get TUN interface index: {}", e);
+                            error!("VPN routing will not work.");
+                            return Err(e);
+                        }
+                    };
+
+                    info!("TUN interface index: {}", tun_if_index);
+
                     // Get the relay host to exclude from VPN routing (avoid circular routing)
                     let relay_host = url::Url::parse(&self.config.relay_url)
                         .ok()
                         .and_then(|u| u.host_str().map(|s| s.to_string()));
 
-                    // First, get the current default gateway (for relay host route)
+                    // Get the current default gateway (for relay host route)
                     let gateway_output = Command::new("powershell")
                         .args([
                             "-Command",
@@ -675,19 +705,19 @@ mod implementation {
                         {
                             for addr in addrs {
                                 if let std::net::SocketAddr::V4(v4) = addr {
-                                    let relay_ip = v4.ip().to_string();
-                                    let _ = Command::new("route")
-                                        .args([
-                                            "add",
-                                            &relay_ip,
-                                            "mask",
-                                            "255.255.255.255",
-                                            &orig_gw.to_string(),
-                                            "metric",
-                                            "1",
-                                        ])
-                                        .output();
-                                    info!("Added relay route: {} via {}", relay_ip, orig_gw);
+                                    let relay_ip = *v4.ip();
+                                    // Use Win32 API to add relay route
+                                    if let Err(e) = windows_routing::add_route(
+                                        relay_ip,
+                                        Ipv4Addr::new(255, 255, 255, 255), // /32 mask
+                                        orig_gw,
+                                        tun_if_index,
+                                        1, // metric
+                                    ) {
+                                        warn!("Failed to add relay route via Win32 API: {}", e);
+                                    } else {
+                                        info!("✅ Added relay route: {} via {} (Win32 API)", relay_ip, orig_gw);
+                                    }
                                     break;
                                 }
                             }
@@ -695,151 +725,93 @@ mod implementation {
                     }
 
                     // SPLIT-TUNNEL ROUTING APPROACH
-                    // Instead of trying to override 0.0.0.0/0, we add two /1 routes that together
-                    // cover all IPs but are more specific than the default route.
-                    // This is the same approach used by OpenVPN and WireGuard.
+                    // Use Win32 API to add two /1 routes that together cover all IPs
+                    // This is more specific than the default route
+                    let tun_ip = self.config.address;
 
-                    // Get TUN interface index
-                    let tun_interface = Command::new("powershell")
+                    // Route 1: 0.0.0.0/1 covers 0.0.0.0 to 127.255.255.255
+                    if let Err(e) = windows_routing::add_route(
+                        Ipv4Addr::new(0, 0, 0, 0),
+                        Ipv4Addr::new(128, 0, 0, 0), // /1 netmask
+                        tun_ip,
+                        tun_if_index,
+                        1, // metric
+                    ) {
+                        warn!("Failed to add route 0.0.0.0/1 via Win32 API: {}", e);
+                    }
+
+                    // Route 2: 128.0.0.0/1 covers 128.0.0.0 to 255.255.255.255
+                    if let Err(e) = windows_routing::add_route(
+                        Ipv4Addr::new(128, 0, 0, 0),
+                        Ipv4Addr::new(128, 0, 0, 0), // /1 netmask
+                        tun_ip,
+                        tun_if_index,
+                        1, // metric
+                    ) {
+                        warn!("Failed to add route 128.0.0.0/1 via Win32 API: {}", e);
+                    }
+
+                    info!("✅ IPv4 split-tunnel routes configured via Win32 API");
+
+                    // Set TUN interface metric to 1 (highest priority) using netsh
+                    // (This part still uses netsh as it's interface configuration, not routing)
+                    let metric_result = Command::new("netsh")
                         .args([
-                            "-Command",
-                            "(Get-NetAdapter -Name 'tun*' | Select-Object -First 1).ifIndex",
+                            "interface",
+                            "ipv4",
+                            "set",
+                            "interface",
+                            &tun_if_index.to_string(),
+                            "metric=1",
                         ])
                         .output();
-
-                    let tun_if_index = match tun_interface {
-                        Ok(output) => String::from_utf8_lossy(&output.stdout).trim().to_string(),
-                        Err(_) => String::new(),
-                    };
-
-                    if tun_if_index.is_empty() {
-                        error!("Failed to get TUN interface index. VPN routing will not work.");
-                    } else {
-                        info!("TUN interface index: {}", tun_if_index);
-
-                        // The gateway must be on-link (on the same subnet as the TUN interface)
-                        // We use the TUN IP itself since it's a point-to-point link
-                        let tun_ip = format!("{}", self.config.address);
-
-                        // Route 1: 0.0.0.0/1 covers 0.0.0.0 to 127.255.255.255
-                        let route1 = Command::new("route")
-                            .args([
-                                "add",
-                                "0.0.0.0",
-                                "mask",
-                                "128.0.0.0", // /1 netmask
-                                &tun_ip,
-                                "metric",
-                                "1",
-                                "if",
-                                &tun_if_index,
-                            ])
-                            .output();
-
-                        match route1 {
-                            Ok(r) => {
-                                if r.status.success() {
-                                    info!("✅ Added route 0.0.0.0/1 via TUN (IF {})", tun_if_index);
-                                } else {
-                                    let stderr = String::from_utf8_lossy(&r.stderr);
-                                    warn!("Route 0.0.0.0/1 failed: {}", stderr);
-                                }
-                            }
-                            Err(e) => warn!("Route 0.0.0.0/1 error: {}", e),
+                    if let Ok(r) = metric_result {
+                        if r.status.success() {
+                            info!("✅ Set TUN interface metric to 1 (highest priority)");
                         }
-
-                        // Route 2: 128.0.0.0/1 covers 128.0.0.0 to 255.255.255.255
-                        let route2 = Command::new("route")
-                            .args([
-                                "add",
-                                "128.0.0.0",
-                                "mask",
-                                "128.0.0.0", // /1 netmask
-                                &tun_ip,
-                                "metric",
-                                "1",
-                                "if",
-                                &tun_if_index,
-                            ])
-                            .output();
-
-                        match route2 {
-                            Ok(r) => {
-                                if r.status.success() {
-                                    info!(
-                                        "✅ Added route 128.0.0.0/1 via TUN (IF {})",
-                                        tun_if_index
-                                    );
-                                } else {
-                                    let stderr = String::from_utf8_lossy(&r.stderr);
-                                    warn!("Route 128.0.0.0/1 failed: {}", stderr);
-                                }
-                            }
-                            Err(e) => warn!("Route 128.0.0.0/1 error: {}", e),
-                        }
-
-                        info!("✅ IPv4 split-tunnel routes configured");
-
-                        // Set TUN interface metric to 1 (highest priority) - Mullvad pattern
-                        let metric_result = Command::new("netsh")
-                            .args([
-                                "interface",
-                                "ipv4",
-                                "set",
-                                "interface",
-                                &tun_if_index,
-                                "metric=1",
-                            ])
-                            .output();
-                        if let Ok(r) = metric_result {
-                            if r.status.success() {
-                                info!("✅ Set TUN interface metric to 1 (highest priority)");
-                            }
-                        }
-
-                        // IPv6 routes to prevent IPv6 leak (Mullvad pattern)
-                        // Route ::/1 covers first half of IPv6 address space
-                        let ipv6_route1 = Command::new("netsh")
-                            .args([
-                                "interface",
-                                "ipv6",
-                                "add",
-                                "route",
-                                "::/1",
-                                &format!("interface={}", tun_if_index),
-                                "metric=1",
-                            ])
-                            .output();
-                        if let Ok(r) = ipv6_route1 {
-                            if r.status.success() {
-                                info!("✅ Added IPv6 route ::/1 via TUN");
-                            } else {
-                                debug!("IPv6 route ::/1 skipped (may not have IPv6)");
-                            }
-                        }
-
-                        // Route 8000::/1 covers second half of IPv6 address space
-                        let ipv6_route2 = Command::new("netsh")
-                            .args([
-                                "interface",
-                                "ipv6",
-                                "add",
-                                "route",
-                                "8000::/1",
-                                &format!("interface={}", tun_if_index),
-                                "metric=1",
-                            ])
-                            .output();
-                        if let Ok(r) = ipv6_route2 {
-                            if r.status.success() {
-                                info!("✅ Added IPv6 route 8000::/1 via TUN");
-                            } else {
-                                debug!("IPv6 route 8000::/1 skipped (may not have IPv6)");
-                            }
-                        }
-
-                        info!("✅ All VPN routes configured - traffic will go via VPN");
                     }
+
+                    // IPv6 routes to prevent IPv6 leak
+                    // (Still using netsh for IPv6 as Win32 API setup is similar but we'll keep it simple)
+                    let ipv6_route1 = Command::new("netsh")
+                        .args([
+                            "interface",
+                            "ipv6",
+                            "add",
+                            "route",
+                            "::/1",
+                            &format!("interface={}", tun_if_index),
+                            "metric=1",
+                        ])
+                        .output();
+                    if let Ok(r) = ipv6_route1 {
+                        if r.status.success() {
+                            info!("✅ Added IPv6 route ::/1 via TUN");
+                        } else {
+                            debug!("IPv6 route ::/1 skipped (may not have IPv6)");
+                        }
+                    }
+
+                    let ipv6_route2 = Command::new("netsh")
+                        .args([
+                            "interface",
+                            "ipv6",
+                            "add",
+                            "route",
+                            "8000::/1",
+                            &format!("interface={}", tun_if_index),
+                            "metric=1",
+                        ])
+                        .output();
+                    if let Ok(r) = ipv6_route2 {
+                        if r.status.success() {
+                            info!("✅ Added IPv6 route 8000::/1 via TUN");
+                        } else {
+                            debug!("IPv6 route 8000::/1 skipped (may not have IPv6)");
+                        }
+                    }
+
+                    info!("✅ All VPN routes configured - traffic will go via VPN");
                 }
 
                 #[cfg(target_os = "linux")]
