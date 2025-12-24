@@ -88,6 +88,7 @@ mod implementation {
 
     /// VPN connection state
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[allow(dead_code)]
     pub enum P2PVpnState {
         Disconnected,
         Connecting,
@@ -98,8 +99,11 @@ mod implementation {
     }
 
     /// Reconnection configuration constants
+    #[allow(dead_code)]
     const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+    #[allow(dead_code)]
     const INITIAL_BACKOFF_MS: u64 = 1000;
+    #[allow(dead_code)]
     const MAX_BACKOFF_MS: u64 = 30000;
 
     /// Statistics for the VPN connection
@@ -481,6 +485,7 @@ mod implementation {
         }
 
         /// Connect to the relay (extracted for reuse in reconnection)
+        #[allow(dead_code)]
         async fn connect_to_relay(
             &self,
         ) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
@@ -496,6 +501,7 @@ mod implementation {
         }
 
         /// Attempt to reconnect with exponential backoff
+        #[allow(dead_code)]
         async fn reconnect_with_backoff(
             &self,
         ) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
