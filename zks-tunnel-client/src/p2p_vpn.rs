@@ -347,6 +347,20 @@ mod implementation {
                                 }
                             }
                         }
+                        TunnelMessage::BatchIpPacket { packets } => {
+                            if let Some(writer) = &device_writer {
+                                debug!("Received BatchIpPacket: {} packets", packets.len());
+                                for payload in packets {
+                                    if let Err(e) = writer.send(&payload).await {
+                                        warn!("Failed to write batch packet to TUN: {}", e);
+                                    } else {
+                                        let mut s = stats.lock().await;
+                                        s.bytes_received += payload.len() as u64;
+                                        s.packets_received += 1;
+                                    }
+                                }
+                            }
+                        }
                         TunnelMessage::Ping => {
                             let _ = relay.send(&TunnelMessage::Pong).await;
                         }
