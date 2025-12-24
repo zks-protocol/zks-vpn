@@ -93,8 +93,14 @@ mod implementation {
         Connecting,
         WaitingForExitPeer,
         Connected,
+        Reconnecting { attempt: u32 },
         Disconnecting,
     }
+
+    /// Reconnection configuration constants
+    const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+    const INITIAL_BACKOFF_MS: u64 = 1000;
+    const MAX_BACKOFF_MS: u64 = 30000;
 
     /// Statistics for the VPN connection
     #[derive(Debug, Default)]
@@ -472,6 +478,80 @@ mod implementation {
             streams.remove(&stream_id);
 
             Ok(())
+        }
+
+        /// Connect to the relay (extracted for reuse in reconnection)
+        async fn connect_to_relay(&self) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
+            let relay = P2PRelay::connect(
+                &self.config.relay_url,
+                &self.config.vernam_url,
+                &self.config.room_id,
+                PeerRole::Client,
+                self.config.proxy.clone(),
+            )
+            .await?;
+            Ok(Arc::new(relay))
+        }
+
+        /// Attempt to reconnect with exponential backoff
+        async fn reconnect_with_backoff(&self) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut attempt = 0u32;
+            
+            while attempt < MAX_RECONNECT_ATTEMPTS {
+                // Calculate backoff with exponential increase, capped at MAX_BACKOFF_MS
+                let backoff = std::cmp::min(
+                    INITIAL_BACKOFF_MS * 2u64.pow(attempt),
+                    MAX_BACKOFF_MS,
+                );
+                
+                // Update state to Reconnecting
+                {
+                    let mut state = self.state.lock().await;
+                    *state = P2PVpnState::Reconnecting { attempt: attempt + 1 };
+                }
+                
+                info!(
+                    "🔄 Reconnecting in {}ms (attempt {}/{})",
+                    backoff,
+                    attempt + 1,
+                    MAX_RECONNECT_ATTEMPTS
+                );
+                
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
+                
+                match self.connect_to_relay().await {
+                    Ok(relay) => {
+                        info!("✅ Reconnected successfully!");
+                        
+                        // Store relay and update state
+                        {
+                            let mut relay_guard = self.relay.write().await;
+                            *relay_guard = Some(relay.clone());
+                        }
+                        {
+                            let mut state = self.state.lock().await;
+                            *state = P2PVpnState::Connected;
+                        }
+                        
+                        return Ok(relay);
+                    }
+                    Err(e) => {
+                        warn!("Reconnection attempt {} failed: {}", attempt + 1, e);
+                        attempt += 1;
+                    }
+                }
+            }
+            
+            // Max attempts exceeded
+            {
+                let mut state = self.state.lock().await;
+                *state = P2PVpnState::Disconnected;
+            }
+            
+            Err(format!(
+                "Max reconnection attempts ({}) exceeded",
+                MAX_RECONNECT_ATTEMPTS
+            ).into())
         }
 
         /// Main TUN device loop
