@@ -428,7 +428,7 @@ impl P2PRelay {
                     .await
                     .send(Message::Text(auth_init.to_json()))
                     .await?;
-                debug!("Sent AuthInit message");
+                debug!("Sent AuthInit message: {}", auth_init.to_json()); // DEBUG LOG
 
                 // Step 2: Wait for AuthResponse from Exit Peer
                 let my_peer_id_clone = my_peer_id.clone();
@@ -439,6 +439,7 @@ impl P2PRelay {
                     while let Some(msg) = reader_clone.lock().await.next().await {
                         match msg? {
                             Message::Text(text) => {
+                                debug!("Received control message: {}", text); // DEBUG LOG
                                 // Check for Welcome message to get our Peer ID
                                 if text.contains("\"type\":\"welcome\"") {
                                     if let Ok(json) =
