@@ -16,7 +16,10 @@ use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 use zks_tunnel_proto::{StreamId, TunnelMessage};
 
+use crate::entropy_events::EntropyEvent;
+use crate::entropy_tax::{EntropyState, EntropyTax};
 use crate::p2p_relay::{P2PRelay, PeerRole};
+use std::collections::HashSet;
 
 /// Active TCP connection managed by Exit Peer
 #[cfg(feature = "socks5")]
@@ -33,6 +36,10 @@ struct ExitPeerState {
     connections: HashMap<StreamId, ActiveConnection>,
     /// Next stream ID for outbound connections
     next_stream_id: StreamId,
+    /// Swarm Entropy state
+    entropy_tax: EntropyTax,
+    /// Peers participating in entropy collection
+    entropy_peers: HashSet<String>,
 }
 
 #[cfg(feature = "socks5")]
@@ -42,6 +49,8 @@ impl ExitPeerState {
         Self {
             connections: HashMap::new(),
             next_stream_id: 1,
+            entropy_tax: EntropyTax::new(),
+            entropy_peers: HashSet::new(),
         }
     }
 }
@@ -193,6 +202,130 @@ pub async fn run_exit_peer(
                                         _ => "OTHER",
                                     };
                                     debug!("IPv4 {} packet to {}", proto_name, dst_ip);
+                                }
+                            }
+                        }
+
+                        TunnelMessage::Control { message } => {
+                            debug!("Control message: {}", message);
+                            // Handle Swarm Entropy events
+                            if let Ok(event) = serde_json::from_str::<EntropyEvent>(&message) {
+                                let mut state = state_clone.lock().await;
+                                let inner = &mut *state;
+                                let tax = &mut inner.entropy_tax;
+                                let peers = &mut inner.entropy_peers;
+
+                                match event {
+                                    EntropyEvent::Commit {
+                                        peer_id,
+                                        commitment,
+                                    } => {
+                                        info!("Received commitment from {}", peer_id);
+                                        peers.insert(peer_id.clone());
+
+                                        // Decode hex commitment
+                                        if let Ok(comm_bytes) = hex::decode(&commitment) {
+                                            if comm_bytes.len() == 32 {
+                                                let mut comm_arr = [0u8; 32];
+                                                comm_arr.copy_from_slice(&comm_bytes);
+
+                                                if let Err(e) = tax
+                                                    .add_peer_commitment(peer_id.clone(), comm_arr)
+                                                {
+                                                    warn!("Failed to add commitment: {}", e);
+                                                } else {
+                                                    // If we haven't committed yet, do so now
+                                                    if tax.state() == EntropyState::Init {
+                                                        let my_commitment = tax.get_commitment();
+                                                        // Use helper to create event (handles hex encoding)
+                                                        let msg = EntropyEvent::commit(
+                                                            relay_clone.peer_id.clone(),
+                                                            my_commitment,
+                                                        );
+                                                        if let Ok(json) = msg.to_json() {
+                                                            relay_clone.send_text(json).await.ok();
+                                                        }
+                                                        tax.mark_committed();
+                                                        info!("Sent Swarm Entropy commitment");
+                                                    }
+                                                }
+                                            } else {
+                                                warn!("Invalid commitment length from {}", peer_id);
+                                            }
+                                        } else {
+                                            warn!("Invalid hex commitment from {}", peer_id);
+                                        }
+                                    }
+                                    EntropyEvent::Reveal { peer_id, entropy } => {
+                                        info!("Received reveal from {}", peer_id);
+
+                                        // Decode hex entropy
+                                        if let Ok(ent_bytes) = hex::decode(&entropy) {
+                                            if ent_bytes.len() == 32 {
+                                                let mut ent_arr = [0u8; 32];
+                                                ent_arr.copy_from_slice(&ent_bytes);
+
+                                                if let Err(e) =
+                                                    tax.add_peer_entropy(peer_id.clone(), ent_arr)
+                                                {
+                                                    warn!("Failed to add reveal: {}", e);
+                                                } else {
+                                                    // If we haven't revealed yet, do so now
+                                                    if tax.state() == EntropyState::Committed {
+                                                        let expected_peers: Vec<String> =
+                                                            peers.iter().cloned().collect();
+                                                        match tax.reveal(&expected_peers) {
+                                                            Ok(my_entropy) => {
+                                                                // Use helper to create event
+                                                                let msg = EntropyEvent::reveal(
+                                                                    relay_clone.peer_id.clone(),
+                                                                    my_entropy,
+                                                                );
+                                                                if let Ok(json) = msg.to_json() {
+                                                                    relay_clone
+                                                                        .send_text(json)
+                                                                        .await
+                                                                        .ok();
+                                                                }
+                                                                info!("Sent Swarm Entropy reveal");
+                                                            }
+                                                            Err(e) => {
+                                                                warn!("Not ready to reveal: {}", e)
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Check if complete
+                                                    let expected_peers: Vec<String> =
+                                                        peers.iter().cloned().collect();
+                                                    if tax.all_revealed(&expected_peers) {
+                                                        match tax.derive_remote_key(
+                                                            &relay_clone.peer_id,
+                                                            room_id,
+                                                            &expected_peers,
+                                                        ) {
+                                                            Ok(key) => {
+                                                                relay_clone
+                                                                    .set_remote_key(key)
+                                                                    .await;
+                                                                info!("✅ Swarm Entropy Collection Complete (Exit Peer)");
+                                                            }
+                                                            Err(e) => {
+                                                                warn!("Failed to derive key: {}", e)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                warn!("Invalid entropy length from {}", peer_id);
+                                            }
+                                        } else {
+                                            warn!("Invalid hex entropy from {}", peer_id);
+                                        }
+                                    }
+                                    EntropyEvent::Ready { peer_count } => {
+                                        info!("Received Ready event ({} peers)", peer_count);
+                                    }
                                 }
                             }
                         }
@@ -471,11 +604,12 @@ pub async fn run_exit_peer_vpn(
     info!("Creating TUN device for VPN forwarding...");
 
     let device = tun_rs::DeviceBuilder::new()
+        .name("zks0")
         .ipv4(std::net::Ipv4Addr::new(10, 0, 85, 2), 24, None)
         .mtu(1400)
         .build_async()?;
 
-    info!("✅ TUN device created (10.0.85.2/24)");
+    info!("✅ TUN device created (zks0 - 10.0.85.2/24)");
 
     // Enable IP forwarding on Linux
     #[cfg(target_os = "linux")]
@@ -485,7 +619,7 @@ pub async fn run_exit_peer_vpn(
             .output();
         info!("Enabled IP forwarding");
 
-        // Setup NAT (get default interface name)
+        // Setup NAT (masquerade)
         let _ = std::process::Command::new("iptables")
             .args([
                 "-t",
@@ -498,7 +632,19 @@ pub async fn run_exit_peer_vpn(
                 "MASQUERADE",
             ])
             .output();
-        info!("Setup NAT masquerading");
+        
+        // Allow traffic on zks0
+        let _ = std::process::Command::new("iptables")
+            .args(["-A", "INPUT", "-i", "zks0", "-j", "ACCEPT"])
+            .output();
+        let _ = std::process::Command::new("iptables")
+            .args(["-A", "FORWARD", "-i", "zks0", "-j", "ACCEPT"])
+            .output();
+        let _ = std::process::Command::new("iptables")
+            .args(["-A", "FORWARD", "-o", "zks0", "-j", "ACCEPT"])
+            .output();
+
+        info!("Setup NAT masquerading and firewall rules for zks0");
     }
 
     let running = Arc::new(AtomicBool::new(true));
