@@ -48,6 +48,8 @@ pub enum CommandType {
     IpPacket = 0x20,
     /// Batch of IP packets for high-throughput VPN mode (reduces WebSocket overhead)
     BatchIpPacket = 0x21,
+    /// Control message (raw JSON/Text) - internal use, not sent on wire as binary
+    Control = 0x30,
 }
 
 impl TryFrom<u8> for CommandType {
@@ -71,6 +73,7 @@ impl TryFrom<u8> for CommandType {
             0x11 => Ok(Self::ChainAck),
             0x20 => Ok(Self::IpPacket),
             0x21 => Ok(Self::BatchIpPacket),
+            0x30 => Ok(Self::Control),
             _ => Err(crate::ProtoError::InvalidCommand(value)),
         }
     }
@@ -186,6 +189,9 @@ pub enum TunnelMessage {
         /// Multiple IP packet payloads
         packets: Vec<Bytes>,
     },
+    /// Control message (raw JSON/Text)
+    /// Used to pass non-tunnel messages (like Swarm Entropy events) up from the relay
+    Control { message: String },
 }
 
 impl TunnelMessage {
@@ -337,6 +343,7 @@ impl TunnelMessage {
                 buf.put_u32(payload.len() as u32);
                 buf.put_slice(payload);
             }
+
             TunnelMessage::BatchIpPacket { packets } => {
                 buf.put_u8(CommandType::BatchIpPacket as u8);
                 buf.put_u16(packets.len() as u16);
@@ -344,6 +351,13 @@ impl TunnelMessage {
                     buf.put_u32(p.len() as u32);
                     buf.put_slice(p);
                 }
+            }
+            TunnelMessage::Control { message } => {
+                // Control messages are internal and shouldn't be encoded as binary frames
+                // But for completeness, we define a format
+                buf.put_u8(CommandType::Control as u8);
+                buf.put_u32(message.len() as u32);
+                buf.put_slice(message.as_bytes());
             }
         }
 
@@ -680,6 +694,21 @@ impl TunnelMessage {
                 }
 
                 Ok(TunnelMessage::BatchIpPacket { packets })
+            }
+            CommandType::Control => {
+                if cursor.remaining() < 4 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let msg_len = cursor.get_u32() as usize;
+                if cursor.remaining() < msg_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let mut msg_bytes = vec![0u8; msg_len];
+                cursor.copy_to_slice(&mut msg_bytes);
+                let message =
+                    String::from_utf8(msg_bytes).map_err(|_| crate::ProtoError::InvalidUtf8)?;
+
+                Ok(TunnelMessage::Control { message })
             }
         }
     }

@@ -260,6 +260,8 @@ pub struct P2PRelay {
     pub room_id: String,
     /// Shared secret for file transfer
     pub shared_secret: [u8; 32],
+    /// Our Peer ID assigned by relay
+    pub peer_id: String,
 }
 
 /// Discover peers from relay messages (welcome + peer_join events)
@@ -417,10 +419,12 @@ impl P2PRelay {
         info!("Connected to relay (status: {})", response.status());
 
         // Split into read/write
-        let (mut writer, mut reader): (
+        let (writer, reader): (
             SplitSink<WebSocketStream<BoxedStream>, Message>,
             SplitStream<WebSocketStream<BoxedStream>>,
         ) = ws_stream.split();
+        let writer = Arc::new(Mutex::new(writer));
+        let reader = Arc::new(Mutex::new(reader));
 
         // === AUTHENTICATED 3-MESSAGE KEY EXCHANGE (Security Fix) ===
         // This replaces the legacy unauthenticated 2-message protocol
@@ -429,30 +433,60 @@ impl P2PRelay {
         //   Exit Peer (Responder): AuthInit ← AuthResponse ← KeyConfirm
         info!("🔑 Initiating authenticated key exchange...");
 
-        let mut key_exchange = KeyExchange::new(room_id);
+        let key_exchange = Arc::new(Mutex::new(KeyExchange::new(room_id)));
+        let my_peer_id = Arc::new(Mutex::new(String::new()));
 
         match role {
             PeerRole::Client => {
                 // === CLIENT (INITIATOR) FLOW ===
                 // Step 1: Create and send AuthInit
                 let auth_init = key_exchange
+                    .lock()
+                    .await
                     .create_auth_init()
                     .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
-                writer.send(Message::Text(auth_init.to_json())).await?;
+                writer
+                    .lock()
+                    .await
+                    .send(Message::Text(auth_init.to_json()))
+                    .await?;
                 debug!("Sent AuthInit message");
 
                 // Step 2: Wait for AuthResponse from Exit Peer
-                let auth_response = timeout(Duration::from_secs(120), async {
-                    while let Some(msg) = reader.next().await {
+                let my_peer_id_clone = my_peer_id.clone();
+                let key_exchange_clone = key_exchange.clone();
+                let writer_clone = writer.clone();
+                let reader_clone = reader.clone();
+                let auth_response = timeout(Duration::from_secs(120), async move {
+                    while let Some(msg) = reader_clone.lock().await.next().await {
                         match msg? {
                             Message::Text(text) => {
+                                // Check for Welcome message to get our Peer ID
+                                if text.contains("\"type\":\"welcome\"") {
+                                    if let Ok(json) =
+                                        serde_json::from_str::<serde_json::Value>(&text)
+                                    {
+                                        if let Some(id) = json["peer_id"].as_str() {
+                                            let mut pid = my_peer_id_clone.lock().await;
+                                            *pid = id.to_string();
+                                            info!("✅ Assigned Peer ID: {}", id);
+                                        }
+                                    }
+                                }
+
                                 // Handle peer join - resend AuthInit
                                 if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
                                     debug!("Peer joined, re-sending AuthInit");
-                                    let auth_init = key_exchange
+                                    let auth_init = key_exchange_clone
+                                        .lock()
+                                        .await
                                         .create_auth_init()
                                         .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
-                                    writer.send(Message::Text(auth_init.to_json())).await?;
+                                    writer_clone
+                                        .lock()
+                                        .await
+                                        .send(Message::Text(auth_init.to_json()))
+                                        .await?;
                                     continue;
                                 }
 
@@ -479,9 +513,15 @@ impl P2PRelay {
 
                 // Step 3: Process AuthResponse and send KeyConfirm
                 let key_confirm = key_exchange
+                    .lock()
+                    .await
                     .process_auth_response_and_confirm(&auth_response)
                     .map_err(|e| format!("Failed to process AuthResponse: {}", e))?;
-                writer.send(Message::Text(key_confirm.to_json())).await?;
+                writer
+                    .lock()
+                    .await
+                    .send(Message::Text(key_confirm.to_json()))
+                    .await?;
                 debug!("Sent KeyConfirm message");
 
                 info!("🔐 Authenticated key exchange complete (Client)!");
@@ -489,10 +529,25 @@ impl P2PRelay {
             PeerRole::ExitPeer => {
                 // === EXIT PEER (RESPONDER) FLOW ===
                 // Step 1: Wait for AuthInit from Client
-                let auth_init = timeout(Duration::from_secs(300), async {
-                    while let Some(msg) = reader.next().await {
+                let my_peer_id_clone = my_peer_id.clone();
+                let reader_clone = reader.clone();
+                let auth_init = timeout(Duration::from_secs(300), async move {
+                    while let Some(msg) = reader_clone.lock().await.next().await {
                         match msg? {
                             Message::Text(text) => {
+                                // Check for Welcome message to get our Peer ID
+                                if text.contains("\"type\":\"welcome\"") {
+                                    if let Ok(json) =
+                                        serde_json::from_str::<serde_json::Value>(&text)
+                                    {
+                                        if let Some(id) = json["peer_id"].as_str() {
+                                            let mut pid = my_peer_id_clone.lock().await;
+                                            *pid = id.to_string();
+                                            info!("✅ Assigned Peer ID: {}", id);
+                                        }
+                                    }
+                                }
+
                                 // Check for AuthInit
                                 if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
                                     if let KeyExchangeMessage::AuthInit { .. } = &ke_msg {
@@ -516,14 +571,21 @@ impl P2PRelay {
 
                 // Step 2: Process AuthInit and send AuthResponse
                 let auth_response = key_exchange
+                    .lock()
+                    .await
                     .process_auth_init_and_respond(&auth_init)
                     .map_err(|e| format!("Failed to process AuthInit: {}", e))?;
-                writer.send(Message::Text(auth_response.to_json())).await?;
+                writer
+                    .lock()
+                    .await
+                    .send(Message::Text(auth_response.to_json()))
+                    .await?;
                 debug!("Sent AuthResponse message");
 
                 // Step 3: Wait for KeyConfirm from Client
-                let key_confirm = timeout(Duration::from_secs(60), async {
-                    while let Some(msg) = reader.next().await {
+                let reader_clone = reader.clone();
+                let key_confirm = timeout(Duration::from_secs(60), async move {
+                    while let Some(msg) = reader_clone.lock().await.next().await {
                         match msg? {
                             Message::Text(text) => {
                                 if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
@@ -547,6 +609,8 @@ impl P2PRelay {
 
                 // Step 4: Verify KeyConfirm
                 key_exchange
+                    .lock()
+                    .await
                     .process_key_confirm(&key_confirm)
                     .map_err(|e| format!("Failed to verify KeyConfirm: {}", e))?;
 
@@ -559,22 +623,26 @@ impl P2PRelay {
 
         // Get the derived encryption key
         let encryption_key = key_exchange
+            .lock()
+            .await
             .get_encryption_key()
             .ok_or("Failed to derive encryption key")?
             .to_vec();
 
         // Initialize Wasif Vernam with derived shared key
-        let mut shared_secret = [0u8; 32];
+        let mut shared_secret_array = [0u8; 32];
         if encryption_key.len() >= 32 {
-            shared_secret.copy_from_slice(&encryption_key[0..32]);
+            shared_secret_array.copy_from_slice(&encryption_key[0..32]);
         }
+        let shared_secret = shared_secret_array;
 
         // === Swarm Entropy Collection ===
         // Collect entropy from peers in room for information-theoretic security
         info!("🎲 Discovering peers for Swarm Entropy collection...");
 
         // Discover peers from relay messages (welcome + peer_join events)
-        let peer_ids = discover_peers_from_relay(&mut reader, Duration::from_secs(2)).await?;
+        let peer_ids =
+            discover_peers_from_relay(&mut *reader.lock().await, Duration::from_secs(2)).await?;
 
         let remote_key = if !peer_ids.is_empty() {
             use crate::swarm_entropy_collection::collect_swarm_entropy_via_relay;
@@ -583,7 +651,15 @@ impl P2PRelay {
                 "🎲 Starting Swarm Entropy collection with {} peers...",
                 peer_ids.len()
             );
-            match collect_swarm_entropy_via_relay(&mut writer, &mut reader, room_id, peer_ids).await
+            let mut writer_guard = writer.lock().await;
+            let mut reader_guard = reader.lock().await;
+            match collect_swarm_entropy_via_relay(
+                &mut *writer_guard,
+                &mut *reader_guard,
+                room_id,
+                peer_ids,
+            )
+            .await
             {
                 Ok(key) => {
                     info!("✅ Swarm Entropy collected! Information-theoretic security ACTIVE");
@@ -616,7 +692,11 @@ impl P2PRelay {
                             // Send the entropy to Exit Peer
                             let entropy_msg =
                                 KeyExchangeMessage::new_shared_entropy(keys.get_remote_key());
-                            writer.send(Message::Text(entropy_msg.to_json())).await?;
+                            writer
+                                .lock()
+                                .await
+                                .send(Message::Text(entropy_msg.to_json()))
+                                .await?;
                             info!("✅ Sent Swarm Entropy to Exit Peer (Double-Key active)");
                         }
                         Err(e) => {
@@ -627,8 +707,9 @@ impl P2PRelay {
                 PeerRole::ExitPeer => {
                     // Exit Peer: Wait for SharedEntropy from Client
                     info!("⏳ Waiting for Swarm Entropy from Client...");
-                    let entropy_timeout = tokio::time::timeout(Duration::from_secs(10), async {
-                        while let Some(msg) = reader.next().await {
+                    let reader_clone = reader.clone();
+                    let entropy_timeout = tokio::time::timeout(Duration::from_secs(10), async move {
+                        while let Some(msg) = reader_clone.lock().await.next().await {
                             if let Message::Text(text) = msg? {
                                 if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
                                     if let Some(entropy_bytes) = ke_msg.parse_shared_entropy() {
@@ -667,15 +748,22 @@ impl P2PRelay {
 
         // Send ack
         let ack = KeyExchangeMessage::Ack { success: true };
-        writer.send(Message::Text(ack.to_json())).await?;
+        writer
+            .lock()
+            .await
+            .send(Message::Text(ack.to_json()))
+            .await?;
+
+        let final_peer_id = my_peer_id.lock().await.clone();
 
         Ok(Self {
-            writer: Arc::new(Mutex::new(writer)),
-            reader: Arc::new(Mutex::new(reader)),
+            writer,
+            reader,
             keys: Arc::new(Mutex::new(keys)),
             role,
             room_id: room_id.to_string(),
             shared_secret,
+            peer_id: final_peer_id,
         })
     }
 
@@ -713,6 +801,22 @@ impl P2PRelay {
         writer.send(Message::Binary(encrypted)).await?;
 
         Ok(())
+    }
+
+    /// Send raw text message (for control/entropy events)
+    pub async fn send_text(
+        &self,
+        text: String,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut writer = self.writer.lock().await;
+        writer.send(Message::Text(text)).await?;
+        Ok(())
+    }
+
+    /// Set the remote key for Double-Key Encryption (Swarm Entropy)
+    pub async fn set_remote_key(&self, key: Vec<u8>) {
+        let mut keys = self.keys.lock().await;
+        keys.set_remote_key(key);
     }
 
     /// Receive and decrypt message from relay
@@ -770,6 +874,10 @@ impl P2PRelay {
                         // For now, ignore re-key requests after initial handshake
                         // A proper implementation would handle re-keying
                     }
+
+                    // Pass text message up to caller as Control message
+                    // This is needed for Swarm Entropy events (EntropyEvent)
+                    return Ok(Some(TunnelMessage::Control { message: text }));
                 }
                 Message::Close(_) => {
                     info!("Relay connection closed");
