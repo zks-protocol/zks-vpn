@@ -82,7 +82,9 @@ windows-service = "0.7"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
 # Linux-specific: Netlink for routing
+[target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = "0.15"
 netlink-packet-route = "0.21"
 ipnetwork = "0.20"
