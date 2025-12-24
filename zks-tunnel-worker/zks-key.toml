@@ -1,0 +1,12 @@
+# ZKS-Key Worker Configuration
+# This worker provides the /entropy endpoint for Wasif Vernam (quantum-resistant encryption)
+
+name = "zks-key"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-01-01"
+
+[build]
+command = "cargo install worker-build && worker-build --release"
+
+# No Durable Objects needed for the entropy endpoint
+# The entropy endpoint is stateless and uses getrandom for cryptographic randomness

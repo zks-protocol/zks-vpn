@@ -25,22 +25,18 @@ jobs:
       
       - uses: Swatinem/rust-cache@v2
       
-      - name: Install wrangler
-        run: npm install -g wrangler
-      
-      - name: Build and Deploy Tunnel Worker
+      - name: Build Worker
         working-directory: zks-tunnel-worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "Deploying ZKS-Tunnel Worker..."
-            wrangler deploy
-          else
-            echo "CLOUDFLARE_API_TOKEN not set, building only..."
-            wrangler build || cargo build --target wasm32-unknown-unknown --release
-          fi
+          cargo install worker-build
+          worker-build --release
+      
+      - name: Deploy Tunnel Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: zks-tunnel-worker
 
   deploy-relay:
     name: Deploy ZKS-Tunnel Relay
@@ -54,19 +50,41 @@ jobs:
       
       - uses: Swatinem/rust-cache@v2
       
-      - name: Install wrangler
-        run: npm install -g wrangler
-      
-      - name: Build and Deploy Relay Worker
+      - name: Build Worker
         working-directory: zks-tunnel-relay
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "Deploying ZKS-Tunnel Relay..."
-            wrangler deploy
-          else
-            echo "CLOUDFLARE_API_TOKEN not set, building only..."
-            wrangler build || cargo build --target wasm32-unknown-unknown --release
-          fi
+          cargo install worker-build
+          worker-build --release
+      
+      - name: Deploy Relay Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: zks-tunnel-relay
+
+  deploy-key:
+    name: Deploy ZKS-Key Worker (Entropy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - uses: Swatinem/rust-cache@v2
+      
+      - name: Build Worker
+        working-directory: zks-tunnel-worker
+        run: |
+          cargo install worker-build
+          worker-build --release
+      
+      - name: Deploy Key Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: zks-tunnel-worker
+          config: zks-key.toml
