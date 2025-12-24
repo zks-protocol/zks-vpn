@@ -340,7 +340,7 @@ mod implementation {
             #[cfg(target_os = "windows")]
             {
                 info!("Removing VPN routes...");
-                
+
                 // Remove IPv4 split-tunnel routes
                 let _ = Command::new("route")
                     .args(["delete", "0.0.0.0", "mask", "128.0.0.0"])
@@ -481,7 +481,9 @@ mod implementation {
         }
 
         /// Connect to the relay (extracted for reuse in reconnection)
-        async fn connect_to_relay(&self) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
+        async fn connect_to_relay(
+            &self,
+        ) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
             let relay = P2PRelay::connect(
                 &self.config.relay_url,
                 &self.config.vernam_url,
@@ -494,35 +496,36 @@ mod implementation {
         }
 
         /// Attempt to reconnect with exponential backoff
-        async fn reconnect_with_backoff(&self) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
+        async fn reconnect_with_backoff(
+            &self,
+        ) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
             let mut attempt = 0u32;
-            
+
             while attempt < MAX_RECONNECT_ATTEMPTS {
                 // Calculate backoff with exponential increase, capped at MAX_BACKOFF_MS
-                let backoff = std::cmp::min(
-                    INITIAL_BACKOFF_MS * 2u64.pow(attempt),
-                    MAX_BACKOFF_MS,
-                );
-                
+                let backoff = std::cmp::min(INITIAL_BACKOFF_MS * 2u64.pow(attempt), MAX_BACKOFF_MS);
+
                 // Update state to Reconnecting
                 {
                     let mut state = self.state.lock().await;
-                    *state = P2PVpnState::Reconnecting { attempt: attempt + 1 };
+                    *state = P2PVpnState::Reconnecting {
+                        attempt: attempt + 1,
+                    };
                 }
-                
+
                 info!(
                     "🔄 Reconnecting in {}ms (attempt {}/{})",
                     backoff,
                     attempt + 1,
                     MAX_RECONNECT_ATTEMPTS
                 );
-                
+
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
-                
+
                 match self.connect_to_relay().await {
                     Ok(relay) => {
                         info!("✅ Reconnected successfully!");
-                        
+
                         // Store relay and update state
                         {
                             let mut relay_guard = self.relay.write().await;
@@ -532,7 +535,7 @@ mod implementation {
                             let mut state = self.state.lock().await;
                             *state = P2PVpnState::Connected;
                         }
-                        
+
                         return Ok(relay);
                     }
                     Err(e) => {
@@ -541,17 +544,18 @@ mod implementation {
                     }
                 }
             }
-            
+
             // Max attempts exceeded
             {
                 let mut state = self.state.lock().await;
                 *state = P2PVpnState::Disconnected;
             }
-            
+
             Err(format!(
                 "Max reconnection attempts ({}) exceeded",
                 MAX_RECONNECT_ATTEMPTS
-            ).into())
+            )
+            .into())
         }
 
         /// Main TUN device loop
