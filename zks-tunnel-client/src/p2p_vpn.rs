@@ -44,11 +44,10 @@ mod implementation {
     use tokio::io::unix::AsyncFd;
 
     // Platform-specific routing modules
+    #[cfg(target_os = "linux")]
+    use crate::linux_routing;
     #[cfg(target_os = "windows")]
     use crate::windows_routing;
-    // Linux routing via netlink - stub implementation for now
-    // #[cfg(target_os = "linux")]
-    // use crate::linux_routing;
 
     /// Abstract writer for TUN device (Single or Multi-Queue)
     #[derive(Clone)]
@@ -442,12 +441,21 @@ mod implementation {
 
             #[cfg(target_os = "linux")]
             {
-                let gateway = format!("{}", self.config.exit_peer_address);
+                let gateway = self.config.exit_peer_address;
                 info!("Removing VPN routes...");
-                let _ = Command::new("ip")
-                    .args(["route", "del", "default", "via", &gateway])
-                    .output();
-                info!("✅ VPN routes removed");
+
+                // Delete default route via netlink
+                match linux_routing::delete_default_route(gateway).await {
+                    Ok(_) => info!("✅ VPN routes removed via netlink"),
+                    Err(e) => {
+                        debug!("Failed to delete route via netlink: {}", e);
+                        // Fallback to shell command
+                        let _ = Command::new("ip")
+                            .args(["route", "del", "default", "via", &gateway.to_string()])
+                            .output();
+                        info!("✅ VPN routes removed (shell fallback)");
+                    }
+                }
             }
 
             // Disable kill switch
@@ -858,12 +866,31 @@ mod implementation {
             // Setup routing (Linux specific)
             {
                 info!("Setting up routes to capture traffic...");
-                // Route via Exit Peer's VPN IP, not our own TUN IP
-                let gateway = format!("{}", self.config.exit_peer_address);
-                let _ = Command::new("ip")
-                    .args(["route", "add", "default", "via", &gateway, "metric", "5"])
-                    .output();
-                info!("✅ Default route added via {}", gateway);
+                // Route via Exit Peer's VPN IP using rtnetlink API
+                let gateway = self.config.exit_peer_address;
+                let interface_index = device.get_index() as u32;
+
+                // Add default route via netlink
+                match linux_routing::add_default_route(gateway, interface_index, 5).await {
+                    Ok(_) => info!("✅ Default route added via {} using netlink", gateway),
+                    Err(e) => {
+                        warn!("Failed to add default route via netlink: {}", e);
+                        warn!("Falling back to shell command");
+                        // Fallback to shell command
+                        let _ = Command::new("ip")
+                            .args([
+                                "route",
+                                "add",
+                                "default",
+                                "via",
+                                &gateway.to_string(),
+                                "metric",
+                                "5",
+                            ])
+                            .output();
+                        info!("✅ Default route added via {} (shell fallback)", gateway);
+                    }
+                }
             }
 
             let queues = device.into_queues();
