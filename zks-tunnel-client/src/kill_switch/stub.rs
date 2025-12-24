@@ -7,11 +7,17 @@ impl StubKillSwitch {
         Self
     }
 
-    pub async fn enable(&self, _allowed_ips: Vec<IpAddr>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn enable(
+        &self,
+        _allowed_ips: Vec<IpAddr>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
-    pub async fn update_allowed_ips(&self, _allowed_ips: Vec<IpAddr>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn update_allowed_ips(
+        &self,
+        _allowed_ips: Vec<IpAddr>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 

@@ -9,7 +9,9 @@ use std::net::Ipv4Addr;
 use tracing::info;
 
 #[cfg(target_os = "linux")]
-use netlink_packet_route::route::{RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteScope, RouteType};
+use netlink_packet_route::route::{
+    RouteAddress, RouteAttribute, RouteMessage, RouteProtocol, RouteScope, RouteType,
+};
 #[cfg(target_os = "linux")]
 use netlink_packet_route::AddressFamily;
 #[cfg(target_os = "linux")]
@@ -36,30 +38,22 @@ pub async fn add_default_route(gateway: Ipv4Addr, interface_index: u32, metric: 
     // Add destination (0.0.0.0/0)
     route
         .attributes
-        .push(RouteAttribute::Destination(
-            RouteAddress::Other(vec![0, 0, 0, 0]),
-        ));
+        .push(RouteAttribute::Destination(RouteAddress::Other(vec![
+            0, 0, 0, 0,
+        ])));
 
     // Add gateway
     route
         .attributes
-        .push(RouteAttribute::Gateway(
-            RouteAddress::Other(gateway.octets().to_vec()),
-        ));
+        .push(RouteAttribute::Gateway(RouteAddress::Other(
+            gateway.octets().to_vec(),
+        )));
 
     // Add output interface
-    route
-        .attributes
-        .push(RouteAttribute::Oif(
-            interface_index,
-        ));
+    route.attributes.push(RouteAttribute::Oif(interface_index));
 
     // Add metric/priority
-    route
-        .attributes
-        .push(RouteAttribute::Priority(
-            metric,
-        ));
+    route.attributes.push(RouteAttribute::Priority(metric));
 
     handle.route().add(route).execute().await?;
 
@@ -88,16 +82,16 @@ pub async fn delete_default_route(gateway: Ipv4Addr) -> Result<()> {
     // Add destination (0.0.0.0/0)
     route
         .attributes
-        .push(RouteAttribute::Destination(
-            RouteAddress::Other(vec![0, 0, 0, 0]),
-        ));
+        .push(RouteAttribute::Destination(RouteAddress::Other(vec![
+            0, 0, 0, 0,
+        ])));
 
     // Add gateway
     route
         .attributes
-        .push(RouteAttribute::Gateway(
-            RouteAddress::Other(gateway.octets().to_vec()),
-        ));
+        .push(RouteAttribute::Gateway(RouteAddress::Other(
+            gateway.octets().to_vec(),
+        )));
 
     handle.route().del(route).execute().await?;
 

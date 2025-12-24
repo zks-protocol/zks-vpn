@@ -92,9 +92,7 @@ impl DnsGuard {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
 
         #[cfg(target_os = "linux")]
-        self.inner
-            .reset_dns()
-            .await?;
+        self.inner.reset_dns().await?;
 
         self.enabled = false;
 

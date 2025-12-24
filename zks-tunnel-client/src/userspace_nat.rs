@@ -3,6 +3,7 @@
 //! This module implements a userspace NAT using smoltcp.
 //! It allows the Exit Peer to forward traffic to the internet without
 //! requiring OS-level NAT (iptables/ICS), enabling "System-Wide VPN" support on Windows.
+#![allow(dead_code)]
 
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;

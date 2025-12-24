@@ -33,12 +33,12 @@ mod implementation {
     use tokio::sync::{mpsc, Mutex, RwLock};
     use tracing::{debug, error, info, warn};
 
+    use crate::dns_guard::DnsGuard;
+    use crate::kill_switch::KillSwitch;
     use crate::p2p_relay::{P2PRelay, PeerRole};
     use netstack_smoltcp::StackBuilder;
     use reqwest::Client;
     use zks_tunnel_proto::{StreamId, TunnelMessage};
-    use crate::dns_guard::DnsGuard;
-    use crate::kill_switch::KillSwitch;
 
     #[cfg(target_os = "linux")]
     use crate::tun_multiqueue::TunQueue;
@@ -267,17 +267,19 @@ mod implementation {
             // Enable kill switch if configured
             if self.config.kill_switch {
                 info!("🔒 Enabling Kill Switch...");
-                
+
                 // Helper to resolve URL
                 async fn resolve_url(url_str: &str) -> Option<std::net::IpAddr> {
-                     if let Ok(url) = url::Url::parse(url_str) {
-                         if let Some(host) = url.host_str() {
-                             if let Ok(mut addrs) = tokio::net::lookup_host(format!("{}:443", host)).await {
-                                 return addrs.next().map(|socket| socket.ip());
-                             }
-                         }
-                     }
-                     None
+                    if let Ok(url) = url::Url::parse(url_str) {
+                        if let Some(host) = url.host_str() {
+                            if let Ok(mut addrs) =
+                                tokio::net::lookup_host(format!("{}:443", host)).await
+                            {
+                                return addrs.next().map(|socket| socket.ip());
+                            }
+                        }
+                    }
+                    None
                 }
 
                 let mut allowed_ips = Vec::new();
@@ -871,13 +873,13 @@ mod implementation {
                     let mut guard = self.dns_guard.lock().await;
                     match DnsGuard::new() {
                         Ok(mut dns_guard) => {
-                            let secure_dns = vec![
-                                "1.1.1.1".parse().unwrap(),
-                                "1.0.0.1".parse().unwrap(),
-                            ];
-                            
+                            let secure_dns =
+                                vec!["1.1.1.1".parse().unwrap(), "1.0.0.1".parse().unwrap()];
+
                             // On Windows, we use the configured device name which maps to the adapter
-                            if let Err(e) = dns_guard.enable(&self.config.device_name, secure_dns).await {
+                            if let Err(e) =
+                                dns_guard.enable(&self.config.device_name, secure_dns).await
+                            {
                                 error!("Failed to enable DNS leak protection: {}", e);
                             } else {
                                 *guard = Some(dns_guard);
@@ -956,11 +958,9 @@ mod implementation {
                 let mut guard = self.dns_guard.lock().await;
                 match DnsGuard::new() {
                     Ok(mut dns_guard) => {
-                        let secure_dns = vec![
-                            "1.1.1.1".parse().unwrap(),
-                            "1.0.0.1".parse().unwrap(),
-                        ];
-                        
+                        let secure_dns =
+                            vec!["1.1.1.1".parse().unwrap(), "1.0.0.1".parse().unwrap()];
+
                         if let Err(e) = dns_guard.enable(device.name(), secure_dns).await {
                             error!("Failed to enable DNS leak protection: {}", e);
                         } else {
@@ -1426,7 +1426,6 @@ mod implementation {
 
             Ok(())
         }
-
 
         /// Get current VPN state
         #[allow(dead_code)]

@@ -6,8 +6,6 @@
 //! Usage:
 //!   zks-vpn --mode exit-peer --room <room_id>
 
-#[cfg(feature = "vpn")]
-
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::io::ErrorKind;

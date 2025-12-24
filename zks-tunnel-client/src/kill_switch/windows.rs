@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::process::Command;
-use tokio::sync::Mutex;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::info;
 
 pub struct WindowsKillSwitch {
@@ -15,7 +15,10 @@ impl WindowsKillSwitch {
         }
     }
 
-    pub async fn enable(&self, allowed_ips: Vec<IpAddr>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn enable(
+        &self,
+        allowed_ips: Vec<IpAddr>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use std::env;
 
         // Save current policy
@@ -71,7 +74,7 @@ impl WindowsKillSwitch {
 
         // Allow specific IPs (Relay/Exit)
         for ip in allowed_ips {
-             let _ = Command::new("netsh")
+            let _ = Command::new("netsh")
                 .args([
                     "advfirewall",
                     "firewall",
@@ -89,15 +92,24 @@ impl WindowsKillSwitch {
         Ok(())
     }
 
-    pub async fn update_allowed_ips(&self, allowed_ips: Vec<IpAddr>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn update_allowed_ips(
+        &self,
+        allowed_ips: Vec<IpAddr>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Remove old IP rules
         let _ = Command::new("netsh")
-            .args(["advfirewall", "firewall", "delete", "rule", "name=ZKS-AllowIP"])
+            .args([
+                "advfirewall",
+                "firewall",
+                "delete",
+                "rule",
+                "name=ZKS-AllowIP",
+            ])
             .output()?;
 
         // Add new IP rules
         for ip in allowed_ips {
-             let _ = Command::new("netsh")
+            let _ = Command::new("netsh")
                 .args([
                     "advfirewall",
                     "firewall",
