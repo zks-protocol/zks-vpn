@@ -7,7 +7,6 @@
 //!   zks-vpn --mode exit-peer --room <room_id>
 
 #[cfg(feature = "vpn")]
-use crate::userspace_nat::{UserspaceNat, UserspaceNatReader, UserspaceNatWriter};
 
 use bytes::Bytes;
 use std::collections::HashMap;
