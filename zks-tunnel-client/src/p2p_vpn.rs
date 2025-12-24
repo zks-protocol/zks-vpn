@@ -39,7 +39,7 @@ mod implementation {
     use reqwest::Client;
 
     #[cfg(target_os = "linux")]
-    use std::os::unix::io::AsRawFd;
+
     #[cfg(target_os = "linux")]
     use tokio::io::unix::AsyncFd;
 
@@ -49,6 +49,7 @@ mod implementation {
     /// Abstract writer for TUN device (Single or Multi-Queue)
     #[derive(Clone)]
     pub enum TunDeviceWriter {
+        #[allow(dead_code)]
         TunRs(Arc<tun_rs::AsyncDevice>),
         #[cfg(target_os = "linux")]
         MultiQueue(Arc<AsyncFd<TunQueue>>), // We use one queue for writing (usually queue 0)
@@ -95,6 +96,7 @@ mod implementation {
         /// Netmask for the TUN interface
         pub netmask: Ipv4Addr,
         /// MTU for the TUN interface
+        #[allow(dead_code)]
         pub mtu: u16,
         /// Enable DNS leak protection (DoH)
         #[allow(dead_code)]
@@ -985,6 +987,7 @@ mod implementation {
         /// Sends IP packets from TUN device as TunnelMessage::IpPacket
         /// Receives IpPacket responses and writes them back to TUN
         /// All packets are encrypted with ZKS keys (X25519 + vernam XOR)
+        #[allow(dead_code)]
         async fn run_tun_raw(
             &self,
             device: tun_rs::AsyncDevice,
