@@ -40,6 +40,14 @@ mod zks_tunnel;
 
 #[cfg(target_os = "linux")]
 mod tun_multiqueue;
+#[cfg(feature = "vpn")]
+mod userspace_nat;
+
+// Platform-specific routing modules
+#[cfg(all(target_os = "windows", feature = "vpn"))]
+mod windows_routing;
+#[cfg(all(target_os = "linux", feature = "vpn"))]
+mod linux_routing;
 
 #[cfg(feature = "swarm")]
 mod p2p_swarm;
@@ -243,12 +251,20 @@ async fn main() -> Result<(), BoxError> {
             });
             return run_p2p_vpn_mode(args, room_id).await;
         }
-        Mode::ExitPeer | Mode::ExitPeerVpn => {
+        Mode::ExitPeer => {
             let room_id = args.room.clone().unwrap_or_else(|| {
                 error!("Room ID required for Exit Peer mode. Use --room <id>");
                 std::process::exit(1);
             });
-            // Use VPN mode (with TUN device) when vpn feature is enabled
+            info!("Running Exit Peer in SOCKS5/TCP mode (no TUN device)");
+            return exit_peer::run_exit_peer(&args.relay, &args.vernam, &room_id).await;
+        }
+        Mode::ExitPeerVpn => {
+            let room_id = args.room.clone().unwrap_or_else(|| {
+                error!("Room ID required for Exit Peer VPN mode. Use --room <id>");
+                std::process::exit(1);
+            });
+            
             #[cfg(feature = "vpn")]
             {
                 info!("Running Exit Peer in VPN mode (TUN device enabled)");
@@ -256,8 +272,9 @@ async fn main() -> Result<(), BoxError> {
             }
             #[cfg(not(feature = "vpn"))]
             {
-                info!("Running Exit Peer in SOCKS5/HTTP mode (no TUN device)");
-                return exit_peer::run_exit_peer(&args.relay, &args.vernam, &room_id).await;
+                error!("❌ Exit Peer VPN mode requires 'vpn' feature!");
+                error!("   Rebuild with: cargo build --release --features vpn");
+                return Err("VPN feature not enabled".into());
             }
         }
         Mode::EntryNode => {

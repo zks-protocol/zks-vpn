@@ -11,7 +11,7 @@ name = "zks-vpn"
 path = "src/main.rs"
 
 [features]
-default = ["socks5", "quantum"]
+default = ["socks5", "quantum", "vpn"]
 socks5 = []
 vpn = ["tun-rs", "netstack-smoltcp", "smoltcp"]
 quantum = ["dep:ml-kem"]
@@ -71,7 +71,16 @@ crossbeam-queue = "0.3.12"
 num_cpus = "1.17.0"
 
 [target.'cfg(windows)'.dependencies]
-# Windows-specific: Wintun driver bindings
+# Windows-specific: Wintun driver bindings and routing APIs
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+] }
+widestring = "1.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Linux-specific: Netlink for routing
+rtnetlink = "0.15"
+ipnetwork = "0.20"
