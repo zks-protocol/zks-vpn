@@ -440,7 +440,7 @@ impl P2PRelay {
                         match msg? {
                             Message::Text(text) => {
                                 debug!("Received control message: {}", text); // DEBUG LOG
-                                // Check for Welcome message to get our Peer ID
+                                                                              // Check for Welcome message to get our Peer ID
                                 if text.contains("\"type\":\"welcome\"") {
                                     if let Ok(json) =
                                         serde_json::from_str::<serde_json::Value>(&text)
