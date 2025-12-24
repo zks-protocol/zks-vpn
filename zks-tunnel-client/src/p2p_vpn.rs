@@ -44,10 +44,11 @@ mod implementation {
     use tokio::io::unix::AsyncFd;
 
     // Platform-specific routing modules
-    #[cfg(target_os = "linux")]
-    use crate::linux_routing;
     #[cfg(target_os = "windows")]
     use crate::windows_routing;
+    // Linux routing via netlink - stub implementation for now
+    // #[cfg(target_os = "linux")]
+    // use crate::linux_routing;
 
     /// Abstract writer for TUN device (Single or Multi-Queue)
     #[derive(Clone)]
