@@ -85,7 +85,7 @@ impl EntropyTax {
             remote_key: None,
             state: EntropyState::Init,
             created_at: Instant::now(),
-            token_balance: 1000, // Initial bootstrap balance
+            token_balance: 1024 * 1024, // Initial bootstrap balance (1MB)
         }
     }
 

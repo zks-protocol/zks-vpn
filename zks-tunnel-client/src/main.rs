@@ -667,6 +667,11 @@ pub async fn start_p2p_vpn(
 
         exit_peer_address: args.exit_peer_address.parse()?,
         server_mode: args.server,
+        role: if args.server {
+            crate::p2p_relay::PeerRole::ExitPeer
+        } else {
+            crate::p2p_relay::PeerRole::Client
+        },
     };
 
     info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");

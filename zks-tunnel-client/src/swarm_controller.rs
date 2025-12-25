@@ -146,6 +146,11 @@ impl SwarmController {
         *self.shutdown_rx.lock().await = Some(shutdown_rx);
 
         // Start VPN client service
+        // Start VPN client service
+        println!(
+            "🔥 DEBUG: Checking enable_client: {}",
+            self.config.enable_client
+        );
         if self.config.enable_client {
             info!("🖥️  Starting VPN Client service...");
             self.start_vpn_client().await?;
@@ -185,8 +190,15 @@ impl SwarmController {
 
     /// Start VPN client (user's own traffic)
     async fn start_vpn_client(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🔥 DEBUG: start_vpn_client ENTERED");
+
         #[cfg(feature = "vpn")]
         {
+            println!("🔥 DEBUG: VPN FEATURE ENABLED");
+            eprintln!("🔥 DEBUG: start_vpn_client CALLED (stderr)");
+            println!("🔥 DEBUG: start_vpn_client CALLED (stdout)");
+            // panic!("🔥 TEST PANIC: start_vpn_client called!");
+
             use crate::p2p_vpn::P2PVpnConfig;
 
             let config = P2PVpnConfig {
@@ -202,6 +214,7 @@ impl SwarmController {
                 proxy: None,
                 exit_peer_address: "10.0.85.2".parse().unwrap(),
                 server_mode: self.config.server_mode,
+                role: crate::p2p_relay::PeerRole::Swarm,
             };
 
             let controller = P2PVpnController::new(config, self.entropy_tax.clone());
@@ -210,9 +223,15 @@ impl SwarmController {
             // Start VPN in background
             let client = self.vpn_client.as_ref().unwrap().clone();
             tokio::spawn(async move {
+                println!("🔥 DEBUG: VPN client background task STARTED");
+                println!("🔥 DEBUG: Acquiring VPN client lock...");
                 let ctrl = client.lock().await;
+                println!("🔥 DEBUG: VPN client lock acquired, calling start()...");
                 if let Err(e) = ctrl.start().await {
+                    eprintln!("🔥 DEBUG: VPN client error: {}", e);
                     error!("VPN client error: {}", e);
+                } else {
+                    println!("🔥 DEBUG: VPN client start() completed successfully");
                 }
             });
         }
@@ -266,6 +285,7 @@ impl SwarmController {
         let vpn_client = self.vpn_client.clone();
         let server_mode = self.config.server_mode;
         let routes = self.routes.clone();
+        let entropy_tax = self.entropy_tax.clone();
 
         tokio::spawn(async move {
             loop {
@@ -274,33 +294,50 @@ impl SwarmController {
                     &relay_url,
                     &vernam_url,
                     &room_id,
-                    crate::p2p_relay::PeerRole::ExitPeer,
+                    crate::p2p_relay::PeerRole::Swarm,
                     None,
                 )
                 .await
                 {
                     Ok(relay) => {
                         info!("🌍 Exit Service CONNECTED to a client!");
-                        let relay = std::sync::Arc::new(relay);
+                        // relay is already Arc<P2PRelay>
 
                         // If in Server Mode, setup bidirectional forwarding with TUN
                         if let (true, Some(client)) = (server_mode, vpn_client.as_ref()) {
                             let client = client.clone();
-                            let routes = routes.clone();
                             let relay = relay.clone();
+                            let routes = routes.clone();
+                            let entropy_tax_handler = entropy_tax.clone();
 
-                            // Spawn handler for this client
-                            tokio::spawn(async move {
+                            // Handle this client connection to completion
+                            // This prevents the loop from immediately reconnecting and kicking this session
+                            let client_handler = tokio::spawn(async move {
                                 // Create channel for sending TO this client (used by Outbound Router)
                                 let (client_tx, mut client_rx) = mpsc::channel(1000);
                                 let relay_send = relay.clone();
+                                let entropy_tax_send = entropy_tax_handler.clone();
 
                                 // Task: Rx from Channel -> Relay (Outbound from TUN)
-                                tokio::spawn(async move {
+                                let _outbound_task = tokio::spawn(async move {
                                     while let Some(msg) = client_rx.recv().await {
+                                        let msg_len =
+                                            if let TunnelMessage::IpPacket { payload } = &msg {
+                                                payload.len()
+                                            } else {
+                                                0
+                                            };
+
                                         if let Err(e) = relay_send.send(&msg).await {
                                             warn!("Failed to send to client relay: {}", e);
                                             break;
+                                        }
+
+                                        if msg_len > 0 {
+                                            entropy_tax_send
+                                                .lock()
+                                                .await
+                                                .earn_tokens(msg_len as u64);
                                         }
                                     }
                                 });
@@ -312,7 +349,6 @@ impl SwarmController {
                                             TunnelMessage::IpPacket { payload } => {
                                                 // 1. Learn Source IP
                                                 if payload.len() >= 20 {
-                                                    // IPv4 Source IP is at offset 12
                                                     let src_ip = Ipv4Addr::new(
                                                         payload[12],
                                                         payload[13],
@@ -340,11 +376,18 @@ impl SwarmController {
                                                 }
 
                                                 // 2. Inject into TUN
+                                                let payload_len = payload.len();
                                                 client
                                                     .lock()
                                                     .await
                                                     .inject_packet(payload.to_vec())
                                                     .await;
+
+                                                // 3. Earn tokens
+                                                entropy_tax_handler
+                                                    .lock()
+                                                    .await
+                                                    .earn_tokens(payload_len as u64);
                                             }
                                             _ => {
                                                 debug!(
@@ -363,6 +406,9 @@ impl SwarmController {
                                 // For now, let it stale.
                                 warn!("Client disconnected");
                             });
+
+                            // Wait for this client to finish before accepting next one
+                            let _ = client_handler.await;
                         } else {
                             // Legacy/Placeholder mode (just keep alive)
                             tokio::spawn(async move {

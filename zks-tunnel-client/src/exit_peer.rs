@@ -92,7 +92,7 @@ pub async fn run_exit_peer(
         let relay =
             match P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::ExitPeer, None).await
             {
-                Ok(r) => Arc::new(r),
+                Ok(r) => r,
                 Err(e) => {
                     warn!("Failed to connect: {}. Retrying in 5s...", e);
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;

@@ -581,6 +581,11 @@ impl KeyExchange {
         self.encryption_key.as_deref()
     }
 
+    /// Get the 32-byte shared secret (X25519)
+    pub fn get_shared_secret_bytes(&self) -> Option<[u8; 32]> {
+        self.shared_secret.as_ref().map(|ss| *ss.as_bytes())
+    }
+
     /// Check if key exchange is complete
     pub fn is_complete(&self) -> bool {
         self.state == KeyExchangeState::Complete

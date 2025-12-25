@@ -3,12 +3,14 @@
 //! Manages WebSocket connection to the ZKS-VPN relay for P2P communication
 //! between Client and Exit Peer with ZKS double-key Vernam encryption.
 
+use crate::key_exchange::{KeyExchange, KeyExchangeMessage};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
 };
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
+use rand::random;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,6 +30,7 @@ pub use zks_tunnel_proto::TunnelMessage;
 pub enum PeerRole {
     Client,
     ExitPeer,
+    Swarm,
 }
 
 impl PeerRole {
@@ -35,6 +38,7 @@ impl PeerRole {
         match self {
             PeerRole::Client => "client",
             PeerRole::ExitPeer => "exit",
+            PeerRole::Swarm => "swarm",
         }
     }
 }
@@ -554,75 +558,12 @@ pub struct P2PRelay {
     /// Shared secret for file transfer
     pub shared_secret: [u8; 32],
     /// Our Peer ID assigned by relay
+    /// Our Peer ID assigned by relay
     pub peer_id: String,
+    /// Key Exchange state
+    pub key_exchange: Arc<Mutex<KeyExchange>>,
 }
 
-/// Discover peers from relay messages (welcome + peer_join events)
-///
-/// Listens to the WebSocket stream for a specified duration to collect peer IDs
-/// from welcome and peer_join messages sent by the relay.
-async fn discover_peers_from_relay<S>(
-    reader: &mut SplitStream<WebSocketStream<S>>,
-    timeout_duration: Duration,
-) -> Result<(Vec<String>, Vec<Message>), Box<dyn std::error::Error + Send + Sync>>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-{
-    use tokio::time::timeout;
-
-    let mut peer_ids = Vec::new();
-    let mut unhandled_messages = Vec::new();
-
-    // Listen for messages for the specified duration
-    let discovery_result = timeout(timeout_duration, async {
-        while let Some(msg) = reader.next().await {
-            let msg = msg?;
-            match msg {
-                Message::Text(ref text) => {
-                    // Try to parse as JSON to extract peer information
-                    let mut handled = false;
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(text) {
-                        // Check for welcome message
-                        if json["type"] == "welcome" {
-                            debug!("Received welcome message: {}", text);
-                            handled = true;
-                        }
-                        // Check for peer_join message
-                        else if json["type"] == "peer_join" {
-                            if let Some(peer_id) = json["peer_id"].as_str() {
-                                info!("Discovered peer: {}", peer_id);
-                                peer_ids.push(peer_id.to_string());
-                                handled = true;
-                            }
-                        }
-                    }
-
-                    if !handled {
-                        unhandled_messages.push(msg);
-                    }
-                }
-                Message::Close(_) => {
-                    return Err::<(), Box<dyn std::error::Error + Send + Sync>>(
-                        "Connection closed during peer discovery".into(),
-                    );
-                }
-                _ => {
-                    unhandled_messages.push(msg);
-                }
-            }
-        }
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    })
-    .await;
-
-    // Timeout is expected - we're just collecting peers for a fixed duration
-    match discovery_result {
-        Ok(_) | Err(_) => {
-            info!("Peer discovery complete: found {} peers", peer_ids.len());
-            Ok((peer_ids, unhandled_messages))
-        }
-    }
-}
 
 #[allow(dead_code)]
 impl P2PRelay {
@@ -633,8 +574,8 @@ impl P2PRelay {
         room_id: &str,
         role: PeerRole,
         proxy: Option<String>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::key_exchange::{KeyExchange, KeyExchangeMessage};
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::key_exchange::KeyExchange;
         use tokio::time::{timeout, Duration};
 
         // Parse URL
@@ -734,354 +675,106 @@ impl P2PRelay {
         //   Exit Peer (Responder): AuthInit ← AuthResponse ← KeyConfirm
         info!("🔑 Initiating authenticated key exchange...");
 
+        let mut my_peer_id = String::new();
+
+        // For Swarm mode, we need to send a Join message first
+        if role == PeerRole::Swarm {
+            let join_msg = serde_json::json!({
+                "type": "join",
+                "peer_id": format!("swarm-{:04x}", random::<u32>()),
+                "addrs": Vec::<String>::new(),
+                "room_id": room_id
+            });
+            writer
+                .lock()
+                .await
+                .send(Message::Text(join_msg.to_string()))
+                .await?;
+            debug!("Sent Swarm Join message");
+        }
+
+        // Step 0: Wait for Welcome message to get our Peer ID
+        let reader_clone = reader.clone();
+        let welcome_timeout = timeout(Duration::from_secs(10), async {
+            let mut reader_guard = reader_clone.lock().await;
+            while let Some(msg) = reader_guard.next().await {
+                match msg? {
+                    Message::Text(text) => {
+                        if text.contains("\"type\":\"welcome\"")
+                            || text.contains("\"type\":\"joined\"")
+                        {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if let Some(id) =
+                                    json["peer_id"].as_str().or(json["your_id"].as_str())
+                                {
+                                    return Ok::<String, Box<dyn std::error::Error + Send + Sync>>(
+                                        id.to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Message::Close(_) => return Err("Connection closed".into()),
+                    _ => {}
+                }
+            }
+            Err("No welcome message".into())
+        })
+        .await;
+
+        if let Ok(Ok(id)) = welcome_timeout {
+            my_peer_id = id;
+            info!("✅ Assigned Peer ID: {}", my_peer_id);
+        }
+
+        // Initialize KeyExchange
         let key_exchange = Arc::new(Mutex::new(KeyExchange::new(room_id)));
-        let my_peer_id = Arc::new(Mutex::new(String::new()));
 
-        match role {
-            PeerRole::Client => {
-                // === CLIENT (INITIATOR) FLOW ===
-                // Step 1: Create and send AuthInit
-                let auth_init = key_exchange
-                    .lock()
-                    .await
-                    .create_auth_init()
-                    .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
-                writer
-                    .lock()
-                    .await
-                    .send(Message::Text(auth_init.to_json()))
-                    .await?;
-                debug!("Sent AuthInit message: {}", auth_init.to_json()); // DEBUG LOG
+        // Initialize keys
+        let keys = Arc::new(Mutex::new(WasifVernam::new([0u8; 32], Vec::new())));
 
-                // Step 2: Wait for AuthResponse from Exit Peer
-                let my_peer_id_clone = my_peer_id.clone();
-                let key_exchange_clone = key_exchange.clone();
-                let writer_clone = writer.clone();
-                let reader_clone = reader.clone();
-                let auth_response = timeout(Duration::from_secs(120), async move {
-                    while let Some(msg) = reader_clone.lock().await.next().await {
-                        match msg? {
-                            Message::Text(text) => {
-                                debug!("Received control message: {}", text); // DEBUG LOG
-                                                                              // Check for Welcome message to get our Peer ID
-                                if text.contains("\"type\":\"welcome\"") {
-                                    if let Ok(json) =
-                                        serde_json::from_str::<serde_json::Value>(&text)
-                                    {
-                                        if let Some(id) = json["peer_id"].as_str() {
-                                            let mut pid = my_peer_id_clone.lock().await;
-                                            *pid = id.to_string();
-                                            info!("✅ Assigned Peer ID: {}", id);
-                                        }
-                                    }
-                                }
-
-                                // Handle peer join - resend AuthInit
-                                if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
-                                    debug!("Peer joined, re-sending AuthInit");
-                                    let auth_init = key_exchange_clone
-                                        .lock()
-                                        .await
-                                        .create_auth_init()
-                                        .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
-                                    writer_clone
-                                        .lock()
-                                        .await
-                                        .send(Message::Text(auth_init.to_json()))
-                                        .await?;
-                                    continue;
-                                }
-
-                                // Check for AuthResponse
-                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                                    if let KeyExchangeMessage::AuthResponse { .. } = &ke_msg {
-                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
-                                            ke_msg,
-                                        );
-                                    }
-                                }
-                                debug!("Control message: {}", text);
-                            }
-                            Message::Close(_) => {
-                                return Err("Connection closed during key exchange".into());
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err("No AuthResponse received".into())
-                })
-                .await
-                .map_err(|_| "AuthResponse timeout")??;
-
-                // Step 3: Process AuthResponse and send KeyConfirm
-                let key_confirm = key_exchange
-                    .lock()
-                    .await
-                    .process_auth_response_and_confirm(&auth_response)
-                    .map_err(|e| format!("Failed to process AuthResponse: {}", e))?;
-                writer
-                    .lock()
-                    .await
-                    .send(Message::Text(key_confirm.to_json()))
-                    .await?;
-                debug!("Sent KeyConfirm message");
-
-                info!("🔐 Authenticated key exchange complete (Client)!");
-            }
-            PeerRole::ExitPeer => {
-                // === EXIT PEER (RESPONDER) FLOW ===
-                // Step 1: Wait for AuthInit from Client
-                let my_peer_id_clone = my_peer_id.clone();
-                let reader_clone = reader.clone();
-                let auth_init = timeout(Duration::from_secs(300), async move {
-                    while let Some(msg) = reader_clone.lock().await.next().await {
-                        match msg? {
-                            Message::Text(text) => {
-                                // Check for Welcome message to get our Peer ID
-                                if text.contains("\"type\":\"welcome\"") {
-                                    if let Ok(json) =
-                                        serde_json::from_str::<serde_json::Value>(&text)
-                                    {
-                                        if let Some(id) = json["peer_id"].as_str() {
-                                            let mut pid = my_peer_id_clone.lock().await;
-                                            *pid = id.to_string();
-                                            info!("✅ Assigned Peer ID: {}", id);
-                                        }
-                                    }
-                                }
-
-                                // Check for AuthInit
-                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                                    if let KeyExchangeMessage::AuthInit { .. } = &ke_msg {
-                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
-                                            ke_msg,
-                                        );
-                                    }
-                                }
-                                debug!("Control message: {}", text);
-                            }
-                            Message::Close(_) => {
-                                return Err("Connection closed during key exchange".into());
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err("No AuthInit received".into())
-                })
-                .await
-                .map_err(|_| "AuthInit timeout")??;
-
-                // Step 2: Process AuthInit and send AuthResponse
-                let auth_response = key_exchange
-                    .lock()
-                    .await
-                    .process_auth_init_and_respond(&auth_init)
-                    .map_err(|e| format!("Failed to process AuthInit: {}", e))?;
-                writer
-                    .lock()
-                    .await
-                    .send(Message::Text(auth_response.to_json()))
-                    .await?;
-                debug!("Sent AuthResponse message");
-
-                // Step 3: Wait for KeyConfirm from Client
-                let reader_clone = reader.clone();
-                let key_confirm = timeout(Duration::from_secs(60), async move {
-                    while let Some(msg) = reader_clone.lock().await.next().await {
-                        match msg? {
-                            Message::Text(text) => {
-                                if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                                    if let KeyExchangeMessage::KeyConfirm { .. } = &ke_msg {
-                                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
-                                            ke_msg,
-                                        );
-                                    }
-                                }
-                            }
-                            Message::Close(_) => {
-                                return Err("Connection closed during key exchange".into());
-                            }
-                            _ => {}
-                        }
-                    }
-                    Err("No KeyConfirm received".into())
-                })
-                .await
-                .map_err(|_| "KeyConfirm timeout")??;
-
-                // Step 4: Verify KeyConfirm
-                key_exchange
-                    .lock()
-                    .await
-                    .process_key_confirm(&key_confirm)
-                    .map_err(|e| format!("Failed to verify KeyConfirm: {}", e))?;
-
-                info!("🔐 Authenticated key exchange complete (Exit Peer)!");
-            }
-        }
-
-        // Key exchange is now complete with mutual authentication
-        info!("✅ Mutual authentication verified - MITM protection active!");
-
-        // Get the derived encryption key
-        let encryption_key = key_exchange
-            .lock()
-            .await
-            .get_encryption_key()
-            .ok_or("Failed to derive encryption key")?
-            .to_vec();
-
-        // Initialize Wasif Vernam with derived shared key
-        let mut shared_secret_array = [0u8; 32];
-        if encryption_key.len() >= 32 {
-            shared_secret_array.copy_from_slice(&encryption_key[0..32]);
-        }
-        let shared_secret = shared_secret_array;
-
-        // === Swarm Entropy Collection ===
-        // Collect entropy from peers in room for information-theoretic security
-        info!("🎲 Discovering peers for Swarm Entropy collection...");
-
-        // Discover peers from relay messages (welcome + peer_join events)
-        let (peer_ids, unhandled_msgs) =
-            discover_peers_from_relay(&mut *reader.lock().await, Duration::from_secs(2)).await?;
-
-        let remote_key = if !peer_ids.is_empty() {
-            use crate::swarm_entropy_collection::collect_swarm_entropy_via_relay;
-
-            info!(
-                "🎲 Starting Swarm Entropy collection with {} peers...",
-                peer_ids.len()
-            );
-            let mut writer_guard = writer.lock().await;
-            let mut reader_guard = reader.lock().await;
-            match collect_swarm_entropy_via_relay(
-                &mut *writer_guard,
-                &mut *reader_guard,
-                room_id,
-                peer_ids,
-            )
-            .await
-            {
-                Ok(key) => {
-                    info!("✅ Swarm Entropy collected! Information-theoretic security ACTIVE");
-                    key
-                }
-                Err(e) => {
-                    warn!(
-                        "⚠️  Failed to collect Swarm Entropy: {}. Falling back to ChaCha20-only",
-                        e
-                    );
-                    Vec::new()
-                }
-            }
-        } else {
-            info!("ℹ️  No peers in room yet, using ChaCha20-only (will upgrade when peers join)");
-            Vec::new()
+        // Create P2PRelay instance immediately
+        let relay = Self {
+            writer: writer.clone(),
+            reader: reader.clone(),
+            keys: keys.clone(),
+            role,
+            room_id: room_id.to_string(),
+            shared_secret: [0u8; 32], // Initial empty secret, will be updated
+            peer_id: my_peer_id.clone(),
+            key_exchange: key_exchange.clone(),
         };
+        let relay_arc = Arc::new(relay);
 
-        let keys = Arc::new(Mutex::new(WasifVernam::new(shared_secret, remote_key)));
+        // Spawn background handshake task for Swarm/Client roles
+        if role == PeerRole::Client || role == PeerRole::Swarm {
+            let relay_clone = relay_arc.clone();
+            let my_peer_id_clone = my_peer_id.clone();
 
-        // === Swarm Entropy Synchronization ===
-        // Client fetches entropy and shares with Exit Peer to ensure both have same key
-        if !vernam_url.is_empty() {
-            match role {
-                PeerRole::Client => {
-                    // Client: Fetch entropy from relay and send to Exit Peer
-                    info!("🎲 Fetching Swarm Entropy from relay...");
-                    match keys.lock().await.fetch_remote_key(vernam_url).await {
-                        Ok(()) => {
-                            // Send the entropy to Exit Peer (non-blocking - continue even if fails)
-                            let entropy_msg = KeyExchangeMessage::new_shared_entropy(
-                                keys.lock().await.get_remote_key(),
-                            );
-                            match writer
-                                .lock()
-                                .await
-                                .send(Message::Text(entropy_msg.to_json()))
-                                .await
-                            {
-                                Ok(()) => {
-                                    info!("✅ Sent Swarm Entropy to Exit Peer (Double-Key active)");
-                                }
-                                Err(e) => {
-                                    warn!("Failed to send entropy to Exit Peer: {}. Continuing with local entropy.", e);
-                                }
-                            }
-                            info!(
-                                "Fetched Swarm Entropy seed from worker - Infinite Vernam active!"
-                            );
-                        }
-                        Err(e) => {
-                            warn!("Failed to fetch swarm entropy: {}. Using ChaCha20 only.", e);
-                        }
-                    }
+            tokio::spawn(async move {
+                // For Swarm mode, add a small random delay to avoid collisions
+                if role == PeerRole::Swarm {
+                    let delay = (my_peer_id_clone.chars().last().unwrap_or('0') as u64 % 10) * 100;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
-                PeerRole::ExitPeer => {
-                    // Exit Peer: Wait for SharedEntropy from Client
-                    info!("⏳ Waiting for Swarm Entropy from Client...");
 
-                    // Check unhandled messages first
-                    let mut entropy_found = None;
-                    for msg in unhandled_msgs {
-                        if let Message::Text(text) = msg {
-                            if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                                if let Some(entropy_bytes) = ke_msg.parse_shared_entropy() {
-                                    entropy_found = Some(entropy_bytes);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(entropy_bytes) = entropy_found {
-                        keys.lock().await.set_remote_key(entropy_bytes);
-                        info!(
-                            "✅ Received Swarm Entropy from Client (Double-Key active) [Buffered]"
-                        );
+                // Send AuthInit
+                if let Ok(auth_init) = relay_clone.key_exchange.lock().await.create_auth_init() {
+                    if let Err(e) = relay_clone.send_text(auth_init.to_json()).await {
+                        warn!("Failed to send AuthInit: {}", e);
                     } else {
-                        let reader_clone = reader.clone();
-                        let entropy_timeout =
-                            tokio::time::timeout(Duration::from_secs(10), async move {
-                                while let Some(msg) = reader_clone.lock().await.next().await {
-                                    if let Message::Text(text) = msg? {
-                                        if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
-                                            if let Some(entropy_bytes) =
-                                                ke_msg.parse_shared_entropy()
-                                            {
-                                                return Ok::<
-                                                    _,
-                                                    Box<dyn std::error::Error + Send + Sync>,
-                                                >(
-                                                    entropy_bytes
-                                                );
-                                            }
-                                        }
-                                        // Ignore other messages (acks, etc.)
-                                    }
-                                }
-                                Err("No entropy received".into())
-                            })
-                            .await;
-
-                        match entropy_timeout {
-                            Ok(Ok(entropy_bytes)) => {
-                                keys.lock().await.set_remote_key(entropy_bytes);
-                                info!("✅ Received Swarm Entropy from Client (Double-Key active)");
-                            }
-                            Ok(Err(e)) => {
-                                warn!("Failed to receive entropy: {}. Using ChaCha20 only.", e);
-                            }
-                            Err(_) => {
-                                warn!("Entropy timeout. Client may not support Double-Key. Using ChaCha20 only.");
-                            }
-                        }
+                        debug!("Sent AuthInit message");
                     }
                 }
-            }
+            });
+        }
 
-            // Start Continuous Entropy Refresher (TRUE forward secrecy)
-            let refresher = ContinuousEntropyRefresher::new(vernam_url.to_string(), keys.clone());
+        // Start Continuous Entropy Refresher (Background Task)
+        {
+            let refresher = crate::p2p_relay::ContinuousEntropyRefresher::new(
+                vernam_url.to_string(),
+                keys.clone(),
+            );
             refresher.start_background_task();
             info!("🔄 Started Continuous Entropy Refresher (TRUE forward secrecy active!)");
 
@@ -1091,24 +784,14 @@ impl P2PRelay {
                 Arc::new(Mutex::new(crate::true_vernam::TrueVernamBuffer::new()));
 
             // Create fetcher and set swarm seed if available (for TRUSTLESS mode)
-            let mut fetcher = crate::true_vernam::TrueVernamFetcher::new(
+            let fetcher = crate::true_vernam::TrueVernamFetcher::new(
                 vernam_url.to_string(),
                 true_vernam_buffer.clone(),
             );
 
             // Pass swarm seed to fetcher (makes it TRUSTLESS)
             // The swarm seed comes from peer entropy collection at the start
-            {
-                let cipher = keys.lock().await;
-                if cipher.has_swarm_entropy() {
-                    let seed = cipher.get_swarm_seed();
-                    fetcher.set_swarm_seed(seed);
-                    info!("🔗 True Vernam: Using peer + worker hybrid entropy (TRUSTLESS)");
-                } else {
-                    info!("⚠️ True Vernam: Using worker only (no peers, trust Cloudflare)");
-                }
-            }
-
+            // (Initially empty, will be updated when handshake completes)
             fetcher.start_background_task();
 
             // Enable True Vernam on the cipher
@@ -1121,25 +804,8 @@ impl P2PRelay {
             );
         }
 
-        // Send ack
-        let ack = KeyExchangeMessage::Ack { success: true };
-        writer
-            .lock()
-            .await
-            .send(Message::Text(ack.to_json()))
-            .await?;
-
-        let final_peer_id = my_peer_id.lock().await.clone();
-
-        Ok(Self {
-            writer,
-            reader,
-            keys,
-            role,
-            room_id: room_id.to_string(),
-            shared_secret,
-            peer_id: final_peer_id,
-        })
+        info!("✅ Connected to relay with ID: {}", my_peer_id);
+        Ok(relay_arc)
     }
 
     /// Send ZKS-encrypted message through relay
@@ -1226,33 +892,90 @@ impl P2PRelay {
                     }
                 }
                 Message::Text(text) => {
-                    // Control message from relay (welcome, peer_join, etc.)
-                    debug!("Relay control message: {}", text);
+                    debug!("Received control message: {}", text);
 
-                    // NOTE: Previously we would return an error here to force reconnection,
-                    // but this causes a race condition where the Go client connects,
-                    // triggering peer_join, which causes Exit Peer to reconnect with new keys.
-                    // Now we just log a warning and continue - the existing keys are still valid.
-                    if text.contains("peer_join")
-                        || text.contains("PeerJoin")
-                        || text.contains("peer_leave")
-                        || text.contains("PeerLeave")
-                    {
-                        warn!("Peer state changed notification received (continuing with existing keys)");
-                        // Don't return error - continue processing with current keys
+                    // Handle Peer Join
+                    if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
+                        info!("👤 Peer joined room");
+                        if self.role == PeerRole::Swarm || self.role == PeerRole::Client {
+                            // Initiate handshake
+                            let auth_init = self
+                                .key_exchange
+                                .lock()
+                                .await
+                                .create_auth_init()
+                                .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
+                            self.send_text(auth_init.to_json()).await?;
+                            debug!("Sent AuthInit to new peer");
+                        }
                     }
 
-                    // Only restart if we receive a new public_key (re-key request)
-                    // This should only happen if the peer intentionally wants to re-key
-                    if text.contains("\"type\":\"key_exchange\"") && text.contains("public_key") {
-                        warn!("Received new key exchange request - this shouldn't happen after handshake");
-                        // For now, ignore re-key requests after initial handshake
-                        // A proper implementation would handle re-keying
+                    // Handle Key Exchange Messages
+                    if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                        match ke_msg {
+                            KeyExchangeMessage::AuthInit { .. } => {
+                                // Respond with AuthResponse
+                                let (auth_response, shared_secret) = {
+                                    let mut ke = self.key_exchange.lock().await;
+                                    let resp = ke
+                                        .process_auth_init_and_respond(&ke_msg)
+                                        .map_err(|e| format!("Failed to handle AuthInit: {}", e))?;
+                                    let secret = ke
+                                        .get_shared_secret_bytes()
+                                        .ok_or("Failed to get shared secret")?;
+                                    (resp, secret)
+                                };
+
+                                self.send_text(auth_response.to_json()).await?;
+                                debug!("Sent AuthResponse");
+
+                                // Update keys
+                                {
+                                    let mut k = self.keys.lock().await;
+                                    *k = WasifVernam::new(shared_secret, Vec::new());
+                                }
+                                info!("✅ Key exchange successful (Responder)!");
+                            }
+                            KeyExchangeMessage::AuthResponse { .. } => {
+                                // Finalize handshake
+                                let (key_confirm, shared_secret) = {
+                                    let mut ke = self.key_exchange.lock().await;
+                                    let confirm =
+                                        ke.process_auth_response_and_confirm(&ke_msg).map_err(
+                                            |e| format!("Failed to handle AuthResponse: {}", e),
+                                        )?;
+                                    let secret = ke
+                                        .get_shared_secret_bytes()
+                                        .ok_or("Failed to get shared secret")?;
+                                    (confirm, secret)
+                                };
+
+                                // Update keys
+                                {
+                                    let mut k = self.keys.lock().await;
+                                    *k = WasifVernam::new(shared_secret, Vec::new());
+                                }
+                                info!("✅ Key exchange successful (Initiator)!");
+
+                                // Send KeyConfirm
+                                self.send_text(key_confirm.to_json()).await?;
+                            }
+                            _ => {}
+                        }
                     }
 
-                    // Pass text message up to caller as Control message
-                    // This is needed for Swarm Entropy events (EntropyEvent)
-                    return Ok(Some(TunnelMessage::Control { message: text }));
+                    // Handle Entropy Sync
+                    if text.contains("\"type\":\"entropy_sync\"") {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(seed_hex) = json["seed"].as_str() {
+                                if let Ok(seed) = hex::decode(seed_hex) {
+                                    let mut k = self.keys.lock().await;
+                                    k.set_remote_key(seed);
+                                    info!("🔄 Received and applied swarm entropy");
+                                }
+                            }
+                        }
+                    }
                 }
                 Message::Close(_) => {
                     info!("Relay connection closed");
@@ -1323,11 +1046,13 @@ impl P2PRelay {
         rate_kbps: u32,
         running: Arc<std::sync::atomic::AtomicBool>,
     ) -> tokio::task::JoinHandle<()> {
+        // ... (existing code) ...
         let writer = self.writer.clone();
         let _reader = self.reader.clone();
         let keys = self.keys.clone();
 
         tokio::spawn(async move {
+            // ... (existing code) ...
             use std::sync::atomic::Ordering;
 
             // Calculate packet size and interval
@@ -1380,5 +1105,14 @@ impl P2PRelay {
 
             info!("CRP: Padding stopped");
         })
+    }
+}
+
+impl Drop for P2PRelay {
+    fn drop(&mut self) {
+        println!(
+            "🔥 DEBUG: Dropping P2PRelay instance for role {:?}",
+            self.role
+        );
     }
 }

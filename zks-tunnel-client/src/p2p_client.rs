@@ -62,7 +62,6 @@ pub async fn run_p2p_client(
 
     // Connect to relay as Client
     let relay = P2PRelay::connect(relay_url, vernam_url, room_id, PeerRole::Client, proxy).await?;
-    let relay = Arc::new(relay);
 
     info!("✅ Connected to relay as Client");
     info!("⏳ Waiting for Exit Peer to connect...");

@@ -6,17 +6,18 @@
 #[cfg(target_os = "windows")]
 use std::net::Ipv4Addr;
 #[cfg(target_os = "windows")]
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
     Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA, ERROR_SUCCESS},
     NetworkManagement::IpHelper::{
-        CreateIpForwardEntry2, DeleteIpForwardEntry2, GetAdaptersAddresses,
-        InitializeIpForwardEntry, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
-        MIB_IPFORWARD_ROW2,
+        CreateIpForwardEntry2, DeleteIpForwardEntry2, GetAdaptersAddresses, GetIpInterfaceEntry,
+        InitializeIpForwardEntry, SetIpInterfaceEntry, GAA_FLAG_SKIP_ANYCAST,
+        GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+        MIB_IPFORWARD_ROW2, MIB_IPINTERFACE_ROW,
     },
-    Networking::WinSock::{NlroManual, AF_INET, AF_UNSPEC, MIB_IPPROTO_NETMGMT},
+    Networking::WinSock::{NlroManual, AF_INET, AF_INET6, AF_UNSPEC, MIB_IPPROTO_NETMGMT},
 };
 
 #[cfg(target_os = "windows")]
@@ -240,6 +241,88 @@ pub fn delete_route(
             Ok(()) // Ignore errors for route deletion
         }
     }
+}
+
+/// Enable IP forwarding on a specific interface
+#[cfg(target_os = "windows")]
+pub fn enable_ip_forwarding(interface_index: u32) -> Result<()> {
+    info!(
+        "Enabling IP forwarding for interface index: {}",
+        interface_index
+    );
+
+    unsafe {
+        // Enable for IPv4
+        let mut row_v4: MIB_IPINTERFACE_ROW = std::mem::zeroed();
+        row_v4.Family = AF_INET;
+        row_v4.InterfaceIndex = interface_index;
+
+        let status = GetIpInterfaceEntry(&mut row_v4);
+        if status == ERROR_SUCCESS {
+            if row_v4.ForwardingEnabled == 0 {
+                row_v4.ForwardingEnabled = 1; // TRUE
+                let status = SetIpInterfaceEntry(&mut row_v4);
+                if status == ERROR_SUCCESS {
+                    info!(
+                        "✅ Programmatically enabled IPv4 forwarding for interface {}",
+                        interface_index
+                    );
+                } else {
+                    warn!(
+                        "Failed to set IPv4 forwarding for interface {}: error {}",
+                        interface_index, status
+                    );
+                }
+            } else {
+                debug!(
+                    "IPv4 forwarding already enabled for interface {}",
+                    interface_index
+                );
+            }
+        } else {
+            warn!(
+                "Failed to get IPv4 interface entry for {}: error {}",
+                interface_index, status
+            );
+        }
+
+        // Enable for IPv6
+        let mut row_v6: MIB_IPINTERFACE_ROW = std::mem::zeroed();
+        row_v6.Family = AF_INET6;
+        row_v6.InterfaceIndex = interface_index;
+
+        let status = GetIpInterfaceEntry(&mut row_v6);
+        if status == ERROR_SUCCESS {
+            if row_v6.ForwardingEnabled == 0 {
+                row_v6.ForwardingEnabled = 1; // TRUE
+                let status = SetIpInterfaceEntry(&mut row_v6);
+                if status == ERROR_SUCCESS {
+                    info!(
+                        "✅ Programmatically enabled IPv6 forwarding for interface {}",
+                        interface_index
+                    );
+                } else {
+                    warn!(
+                        "Failed to set IPv6 forwarding for interface {}: error {}",
+                        interface_index, status
+                    );
+                }
+            } else {
+                debug!(
+                    "IPv6 forwarding already enabled for interface {}",
+                    interface_index
+                );
+            }
+        } else {
+            // IPv6 might not be enabled on the interface, don't treat as fatal error
+            debug!(
+                "Failed to get IPv6 interface entry for {}: error {}",
+                interface_index, status
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert netmask to prefix length

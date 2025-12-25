@@ -60,7 +60,7 @@ impl WindowsDnsGuard {
         if !ipv4_servers.is_empty() {
             debug!("Setting IPv4 DNS servers: {:?}", ipv4_servers);
             unsafe {
-                set_interface_dns_settings(ipv4_servers.as_slice())?;
+                set_interface_dns_settings(interface_name, ipv4_servers.as_slice())?;
             }
         }
 
@@ -97,42 +97,47 @@ fn interface_to_guid(name: &str) -> Result<GUID> {
     })
 }
 
-/// Set DNS servers using SetInterfaceDnsSettings
-unsafe fn set_interface_dns_settings(ipv4_servers: &[Ipv4Addr]) -> Result<()> {
-    // This is a simplified version
-    // Full implementation requires:
-    // 1. Dynamic loading of SetInterfaceDnsSettings from iphlpapi.dll
-    // 2. Proper DNS_INTERFACE_SETTINGS structure setup
-    // 3. Error handling for Win32 errors
-
-    debug!("Setting DNS via Win32 API (stub - see Mullvad implementation)");
-
-    // TODO: Implement full Win32 API call
-    // For now, fall back to netsh for safety
+/// Set DNS servers using netsh
+unsafe fn set_interface_dns_settings(
+    interface_name: &str,
+    ipv4_servers: &[Ipv4Addr],
+) -> Result<()> {
     use std::process::Command;
 
     for (i, server) in ipv4_servers.iter().enumerate() {
-        let index_arg = if i == 0 {
-            "static".to_string()
-        } else {
-            format!("index={}", i + 1)
-        };
+        let mut cmd = Command::new("netsh");
+        cmd.args(["interface", "ipv4"]);
 
-        let output = Command::new("netsh")
-            .args([
-                "interface",
-                "ipv4",
+        if i == 0 {
+            // Set primary DNS
+            cmd.args([
                 "set",
                 "dns",
-                "name=\"Tunnel\"",
-                &index_arg,
-            ])
-            .arg(server.to_string())
-            .output()
-            .map_err(std::io::Error::other)?;
+                &format!("name={}", interface_name),
+                "static",
+                &server.to_string(),
+                "primary",
+            ]);
+        } else {
+            // Add secondary DNS
+            cmd.args([
+                "add",
+                "dns",
+                &format!("name={}", interface_name),
+                &server.to_string(),
+                &format!("index={}", i + 1),
+            ]);
+        }
+
+        let output = cmd.output().map_err(std::io::Error::other)?;
 
         if !output.status.success() {
-            return Err(std::io::Error::other(format!("netsh failed: {:?}", output)));
+            return Err(std::io::Error::other(format!(
+                "netsh failed: status={:?}, stdout={}, stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
     }
 

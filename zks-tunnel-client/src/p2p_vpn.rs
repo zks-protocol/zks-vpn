@@ -122,6 +122,8 @@ mod implementation {
         pub exit_peer_address: Ipv4Addr,
         /// Server mode (Exit Node) - skip default route, enable NAT
         pub server_mode: bool,
+        /// Peer role for relay connection
+        pub role: PeerRole,
     }
 
     impl Default for P2PVpnConfig {
@@ -139,6 +141,7 @@ mod implementation {
                 proxy: None,
                 exit_peer_address: Ipv4Addr::new(10, 0, 85, 2),
                 server_mode: false,
+                role: PeerRole::Client,
             }
         }
     }
@@ -267,17 +270,20 @@ mod implementation {
                     return Err(e);
                 }
             };
+            info!("🔍 DEBUG: reconnect_with_backoff() returned successfully");
 
             {
                 let mut relay_guard = self.relay.write().await;
                 *relay_guard = Some(relay.clone());
             }
+            info!("🔍 DEBUG: Relay stored in shared state");
 
             // Update state - waiting for Exit Peer
             {
                 let mut state = self.state.lock().await;
                 *state = P2PVpnState::WaitingForExitPeer;
             }
+            info!("🔍 DEBUG: State updated to WaitingForExitPeer");
             info!(
                 "⏳ Waiting for Exit Peer to connect to room '{}'...",
                 self.config.room_id
@@ -287,6 +293,7 @@ mod implementation {
             // In a real implementation, we'd have a more robust handshake
             // For now, we proceed and let connections fail if Exit Peer isn't ready
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            info!("🔍 DEBUG: Sleep complete, proceeding to TUN creation");
 
             self.running.store(true, Ordering::SeqCst);
 
@@ -323,6 +330,7 @@ mod implementation {
                 }
             }
             // Create TUN device and start packet processing
+            info!("🔍 DEBUG: About to call run_tun_loop()");
             self.run_tun_loop(relay).await?;
 
             let mut state = self.state.lock().await;
@@ -642,16 +650,29 @@ mod implementation {
         #[allow(dead_code)]
         async fn connect_to_relay(
             &self,
+            role: PeerRole,
         ) -> Result<Arc<P2PRelay>, Box<dyn std::error::Error + Send + Sync>> {
+            println!(
+                "🔥 DEBUG: Inside connect_to_relay, calling P2PRelay::connect for role {:?}...",
+                role
+            );
             let relay = P2PRelay::connect(
                 &self.config.relay_url,
                 &self.config.vernam_url,
                 &self.config.room_id,
-                PeerRole::Client,
+                role,
                 self.config.proxy.clone(),
             )
-            .await?;
-            Ok(Arc::new(relay))
+            .await;
+
+            println!("🔥 DEBUG: Inside connect_to_relay, P2PRelay::connect returned (Result) for role {:?}!", role);
+            let relay = relay?;
+            println!(
+                "🔥 DEBUG: Inside connect_to_relay, unwrapped relay for role {:?}!",
+                role
+            );
+
+            Ok(relay)
         }
 
         /// Attempt to reconnect with exponential backoff
@@ -685,24 +706,31 @@ mod implementation {
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
 
-                match self.connect_to_relay().await {
+                println!("🔥 DEBUG: Calling connect_to_relay()...");
+                match self.connect_to_relay(self.config.role).await {
                     Ok(relay) => {
+                        println!("🔥 DEBUG: connect_to_relay returned Ok!");
                         info!("✅ Reconnected successfully!");
 
                         // Store relay and update state
                         {
+                            println!("🔥 DEBUG: Acquiring relay write lock...");
                             let mut relay_guard = self.relay.write().await;
                             *relay_guard = Some(relay.clone());
+                            println!("🔥 DEBUG: Relay write lock released");
                         }
                         {
+                            println!("🔥 DEBUG: Acquiring state lock...");
                             let mut state = self.state.lock().await;
                             *state = P2PVpnState::Connected;
+                            println!("🔥 DEBUG: State lock released (Connected)");
                         }
 
                         return Ok(relay);
                     }
                     Err(e) => {
-                        warn!("Reconnection attempt {} failed: {}", attempt + 1, e);
+                        println!("🔥 DEBUG: connect_to_relay returned Err: {}", e);
+                        warn!("Failed to connect to relay: {}", e);
                         attempt += 1;
                     }
                 }
@@ -710,8 +738,10 @@ mod implementation {
 
             // Max attempts exceeded
             {
+                println!("🔥 DEBUG: Acquiring state lock for final Disconnected state...");
                 let mut state = self.state.lock().await;
                 *state = P2PVpnState::Disconnected;
+                println!("🔥 DEBUG: State lock released (Disconnected)");
             }
 
             Err(format!(
@@ -735,10 +765,23 @@ mod implementation {
 
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
-                let device = tun_rs::DeviceBuilder::new()
-                    .ipv4(self.config.address, 24, None)
-                    .mtu(self.config.mtu)
-                    .build_async()?;
+                let config_address = self.config.address;
+                let config_mtu = self.config.mtu;
+
+                info!("Creating TUN device (blocking)...");
+                let start_tun = std::time::Instant::now();
+                let device = tokio::task::spawn_blocking(move || {
+                    debug!("🔥 DEBUG: Inside spawn_blocking, calling build_async...");
+                    let res = tun_rs::DeviceBuilder::new()
+                        .ipv4(config_address, 24, None)
+                        .mtu(config_mtu)
+                        .build_async();
+                    debug!("🔥 DEBUG: build_async returned");
+                    res
+                })
+                .await??;
+                let tun_duration = start_tun.elapsed();
+                info!("✅ TUN device created in {}ms", tun_duration.as_millis());
 
                 // Get actual device name from tun-rs (critical for Windows Wintun)
                 let actual_device_name = match device.name() {
@@ -755,177 +798,186 @@ mod implementation {
                     }
                 };
 
-                // Set up routing to capture all traffic through the VPN tunnel
+                // Set up routing or forwarding
                 #[cfg(target_os = "windows")]
-                if !self.config.server_mode {
-                    info!("Setting up routes to capture traffic...");
-
+                {
                     // Get TUN interface index using the ACTUAL device name from tun-rs
-                    // On Windows, Wintun creates adapters with GUID-like names
-                    let tun_if_index = match windows_routing::get_tun_interface_index(
-                        &actual_device_name,
-                    ) {
-                        Ok(idx) => idx,
-                        Err(e) => {
-                            // Fallback: try searching by description "Wintun" if name search fails
-                            warn!(
-                                "Device name '{}' not found, trying Wintun pattern...",
-                                actual_device_name
-                            );
-                            match windows_routing::get_tun_interface_index("wintun") {
-                                Ok(idx) => idx,
-                                Err(_) => {
-                                    error!("Failed to get TUN interface index: {}", e);
-                                    error!("VPN routing will not work. Make sure Wintun driver is installed.");
-                                    return Err(e);
-                                }
-                            }
-                        }
-                    };
-
-                    info!("TUN interface index: {}", tun_if_index);
-
-                    // Get the relay host to exclude from VPN routing (avoid circular routing)
-                    let relay_host = url::Url::parse(&self.config.relay_url)
-                        .ok()
-                        .and_then(|u| u.host_str().map(|s| s.to_string()));
-
-                    // Get the current default gateway (for relay host route)
-                    let gateway_output = Command::new("powershell")
-                        .args([
-                            "-Command",
-                            "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop",
-                        ])
-                        .output();
-
-                    let original_gateway = gateway_output.ok().and_then(|o| {
-                        String::from_utf8_lossy(&o.stdout)
-                            .trim()
-                            .parse::<std::net::Ipv4Addr>()
-                            .ok()
-                    });
-
-                    // If we have a relay host, add a specific route through original gateway first
-                    if let (Some(host), Some(orig_gw)) = (&relay_host, original_gateway) {
-                        info!("Adding direct route for relay host: {}", host);
-                        // Resolve hostname to IP
-                        if let Ok(addrs) =
-                            std::net::ToSocketAddrs::to_socket_addrs(&format!("{}:443", host))
-                        {
-                            for addr in addrs {
-                                if let std::net::SocketAddr::V4(v4) = addr {
-                                    let relay_ip = *v4.ip();
-                                    // Use Win32 API to add relay route
-                                    if let Err(e) = windows_routing::add_route(
-                                        relay_ip,
-                                        Ipv4Addr::new(255, 255, 255, 255), // /32 mask
-                                        orig_gw,
-                                        tun_if_index,
-                                        1, // metric
-                                    ) {
-                                        warn!("Failed to add relay route via Win32 API: {}", e);
-                                    } else {
-                                        info!(
-                                            "✅ Added relay route: {} via {} (Win32 API)",
-                                            relay_ip, orig_gw
-                                        );
+                    let tun_if_index =
+                        match windows_routing::get_tun_interface_index(&actual_device_name) {
+                            Ok(idx) => idx,
+                            Err(e) => {
+                                warn!(
+                                    "Device name '{}' not found, trying Wintun pattern...",
+                                    actual_device_name
+                                );
+                                match windows_routing::get_tun_interface_index("wintun") {
+                                    Ok(idx) => idx,
+                                    Err(_) => {
+                                        error!("Failed to get TUN interface index: {}", e);
+                                        0 // Continue without index, forwarding/routing will fail
                                     }
-                                    break;
                                 }
+                            }
+                        };
+
+                    if tun_if_index != 0 {
+                        info!("TUN interface index: {}", tun_if_index);
+
+                        if self.config.server_mode {
+                            // Exit Node needs IP forwarding enabled on the TUN interface
+                            if let Err(e) = windows_routing::enable_ip_forwarding(tun_if_index) {
+                                warn!("Failed to enable IP forwarding: {}", e);
                             }
                         }
                     }
 
-                    // SPLIT-TUNNEL ROUTING APPROACH
-                    // Use Win32 API to add two /1 routes that together cover all IPs
-                    // This is more specific than the default route
-                    let tun_ip = self.config.address;
+                    if !self.config.server_mode && tun_if_index != 0 {
+                        info!("Setting up routes to capture traffic...");
 
-                    // Route 1: 0.0.0.0/1 covers 0.0.0.0 to 127.255.255.255
-                    if let Err(e) = windows_routing::add_route(
-                        Ipv4Addr::new(0, 0, 0, 0),
-                        Ipv4Addr::new(128, 0, 0, 0), // /1 netmask
-                        tun_ip,
-                        tun_if_index,
-                        1, // metric
-                    ) {
-                        warn!("Failed to add route 0.0.0.0/1 via Win32 API: {}", e);
-                    }
+                        // Get the relay host to exclude from VPN routing (avoid circular routing)
+                        let relay_host = url::Url::parse(&self.config.relay_url)
+                            .ok()
+                            .and_then(|u| u.host_str().map(|s| s.to_string()));
 
-                    // Route 2: 128.0.0.0/1 covers 128.0.0.0 to 255.255.255.255
-                    if let Err(e) = windows_routing::add_route(
-                        Ipv4Addr::new(128, 0, 0, 0),
-                        Ipv4Addr::new(128, 0, 0, 0), // /1 netmask
-                        tun_ip,
-                        tun_if_index,
-                        1, // metric
-                    ) {
-                        warn!("Failed to add route 128.0.0.0/1 via Win32 API: {}", e);
-                    }
+                        // Get the current default gateway (for relay host route)
+                        let gateway_output = Command::new("powershell")
+                            .args([
+                                "-Command",
+                                "(Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1).NextHop",
+                            ])
+                            .output();
 
-                    info!("✅ IPv4 split-tunnel routes configured via Win32 API");
+                        let original_gateway = gateway_output.ok().and_then(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .trim()
+                                .parse::<std::net::Ipv4Addr>()
+                                .ok()
+                        });
 
-                    // Set TUN interface metric to 1 (highest priority) using netsh
-                    // (This part still uses netsh as it's interface configuration, not routing)
-                    let metric_result = Command::new("netsh")
-                        .args([
-                            "interface",
-                            "ipv4",
-                            "set",
-                            "interface",
-                            &tun_if_index.to_string(),
-                            "metric=1",
-                        ])
-                        .output();
-                    if let Ok(r) = metric_result {
-                        if r.status.success() {
-                            info!("✅ Set TUN interface metric to 1 (highest priority)");
+                        // If we have a relay host, add a specific route through original gateway first
+                        if let (Some(host), Some(orig_gw)) = (&relay_host, original_gateway) {
+                            info!("Adding direct route for relay host: {}", host);
+                            // Resolve hostname to IP
+                            if let Ok(addrs) =
+                                std::net::ToSocketAddrs::to_socket_addrs(&format!("{}:443", host))
+                            {
+                                for addr in addrs {
+                                    if let std::net::SocketAddr::V4(v4) = addr {
+                                        let relay_ip = *v4.ip();
+                                        // Use Win32 API to add relay route
+                                        if let Err(e) = windows_routing::add_route(
+                                            relay_ip,
+                                            Ipv4Addr::new(255, 255, 255, 255), // /32 mask
+                                            orig_gw,
+                                            tun_if_index,
+                                            1, // metric
+                                        ) {
+                                            warn!("Failed to add relay route via Win32 API: {}", e);
+                                        } else {
+                                            info!(
+                                                "✅ Added relay route: {} via {} (Win32 API)",
+                                                relay_ip, orig_gw
+                                            );
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                    }
 
-                    // IPv6 routes to prevent IPv6 leak
-                    // (Still using netsh for IPv6 as Win32 API setup is similar but we'll keep it simple)
-                    let ipv6_route1 = Command::new("netsh")
-                        .args([
-                            "interface",
-                            "ipv6",
-                            "add",
-                            "route",
-                            "::/1",
-                            &format!("interface={}", tun_if_index),
-                            "metric=1",
-                        ])
-                        .output();
-                    if let Ok(r) = ipv6_route1 {
-                        if r.status.success() {
-                            info!("✅ Added IPv6 route ::/1 via TUN");
-                        } else {
-                            debug!("IPv6 route ::/1 skipped (may not have IPv6)");
+                        // SPLIT-TUNNEL ROUTING APPROACH
+                        // Use Win32 API to add two /1 routes that together cover all IPs
+                        // This is more specific than the default route
+                        let tun_ip = self.config.address;
+
+                        // Route 1: 0.0.0.0/1 covers 0.0.0.0 to 127.255.255.255
+                        if let Err(e) = windows_routing::add_route(
+                            Ipv4Addr::new(0, 0, 0, 0),
+                            Ipv4Addr::new(128, 0, 0, 0), // /1 netmask
+                            tun_ip,
+                            tun_if_index,
+                            1, // metric
+                        ) {
+                            warn!("Failed to add route 0.0.0.0/1 via Win32 API: {}", e);
                         }
-                    }
 
-                    let ipv6_route2 = Command::new("netsh")
-                        .args([
-                            "interface",
-                            "ipv6",
-                            "add",
-                            "route",
-                            "8000::/1",
-                            &format!("interface={}", tun_if_index),
-                            "metric=1",
-                        ])
-                        .output();
-                    if let Ok(r) = ipv6_route2 {
-                        if r.status.success() {
-                            info!("✅ Added IPv6 route 8000::/1 via TUN");
-                        } else {
-                            debug!("IPv6 route 8000::/1 skipped (may not have IPv6)");
+                        // Route 2: 128.0.0.0/1 covers 128.0.0.0 to 255.255.255.255
+                        if let Err(e) = windows_routing::add_route(
+                            Ipv4Addr::new(128, 0, 0, 0),
+                            Ipv4Addr::new(128, 0, 0, 0), // /1 netmask
+                            tun_ip,
+                            tun_if_index,
+                            1, // metric
+                        ) {
+                            warn!("Failed to add route 128.0.0.0/1 via Win32 API: {}", e);
                         }
-                    }
 
-                    info!("✅ All VPN routes configured - traffic will go via VPN");
-                } else {
-                    info!("Server Mode: Skipping client routing configuration");
+                        info!("✅ IPv4 split-tunnel routes configured via Win32 API");
+
+                        // Set TUN interface metric to 1 (highest priority) using netsh
+                        // (This part still uses netsh as it's interface configuration, not routing)
+                        let metric_result = Command::new("netsh")
+                            .args([
+                                "interface",
+                                "ipv4",
+                                "set",
+                                "interface",
+                                &tun_if_index.to_string(),
+                                "metric=1",
+                            ])
+                            .output();
+                        if let Ok(r) = metric_result {
+                            if r.status.success() {
+                                info!("✅ Set TUN interface metric to 1 (highest priority)");
+                            }
+                        }
+
+                        // IPv6 routes to prevent IPv6 leak
+                        // (Still using netsh for IPv6 as Win32 API setup is similar but we'll keep it simple)
+                        let ipv6_route1 = Command::new("netsh")
+                            .args([
+                                "interface",
+                                "ipv6",
+                                "add",
+                                "route",
+                                "::/1",
+                                &format!("interface={}", tun_if_index),
+                                "metric=1",
+                            ])
+                            .output();
+                        if let Ok(r) = ipv6_route1 {
+                            if r.status.success() {
+                                info!("✅ Added IPv6 route ::/1 via TUN");
+                            } else {
+                                debug!("IPv6 route ::/1 skipped (may not have IPv6)");
+                            }
+                        }
+
+                        let ipv6_route2 = Command::new("netsh")
+                            .args([
+                                "interface",
+                                "ipv6",
+                                "add",
+                                "route",
+                                "8000::/1",
+                                &format!("interface={}", tun_if_index),
+                                "metric=1",
+                            ])
+                            .output();
+                        if let Ok(r) = ipv6_route2 {
+                            if r.status.success() {
+                                info!("✅ Added IPv6 route 8000::/1 via TUN");
+                            } else {
+                                debug!("IPv6 route 8000::/1 skipped (may not have IPv6)");
+                            }
+                        }
+
+                        info!("✅ All VPN routes configured - traffic will go via VPN");
+                    } else if self.config.server_mode {
+                        info!("Server Mode: Skipping client routing configuration (Forwarding enabled)");
+                    } else {
+                        warn!("Skipping routing configuration: TUN interface index not found");
+                    }
                 }
 
                 // Enable DNS leak protection if configured
@@ -937,9 +989,8 @@ mod implementation {
                             let secure_dns =
                                 vec!["1.1.1.1".parse().unwrap(), "1.0.0.1".parse().unwrap()];
 
-                            // On Windows, we use the configured device name which maps to the adapter
-                            if let Err(e) =
-                                dns_guard.enable(&self.config.device_name, secure_dns).await
+                            // On Windows, we use the actual device name from tun-rs
+                            if let Err(e) = dns_guard.enable(&actual_device_name, secure_dns).await
                             {
                                 error!("Failed to enable DNS leak protection: {}", e);
                             } else {
@@ -988,18 +1039,32 @@ mod implementation {
                 [255, 0, 0, 0] => 8,
                 _ => 24, // Default to /24
             };
-            info!("Assigning IP {}/{} to {}", ip_addr, netmask_prefix, device.name());
-            
+            info!(
+                "Assigning IP {}/{} to {}",
+                ip_addr,
+                netmask_prefix,
+                device.name()
+            );
+
             // Add IP address to interface
             let ip_cmd = std::process::Command::new("ip")
-                .args(["addr", "add", &format!("{}/{}", ip_addr, netmask_prefix), "dev", device.name()])
+                .args([
+                    "addr",
+                    "add",
+                    &format!("{}/{}", ip_addr, netmask_prefix),
+                    "dev",
+                    device.name(),
+                ])
                 .output();
             match ip_cmd {
                 Ok(output) if output.status.success() => {
                     info!("✅ IP address assigned: {}/{}", ip_addr, netmask_prefix);
                 }
                 Ok(output) => {
-                    warn!("Failed to assign IP: {}", String::from_utf8_lossy(&output.stderr));
+                    warn!(
+                        "Failed to assign IP: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to run ip addr command: {}", e);
@@ -1015,7 +1080,10 @@ mod implementation {
                     info!("✅ Interface {} is UP", device.name());
                 }
                 Ok(output) => {
-                    warn!("Failed to bring interface up: {}", String::from_utf8_lossy(&output.stderr));
+                    warn!(
+                        "Failed to bring interface up: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
                 }
                 Err(e) => {
                     warn!("Failed to run ip link command: {}", e);
