@@ -476,13 +476,12 @@ impl WasifVernam {
 /// - Mix into existing seed using refresh_entropy()
 /// - Provides forward secrecy: past traffic is unrecoverable even if current seed leaks
 pub struct ContinuousEntropyRefresher {
-    vernam_url: String,
     cipher: Arc<Mutex<WasifVernam>>,
 }
 
 impl ContinuousEntropyRefresher {
-    pub fn new(vernam_url: String, cipher: Arc<Mutex<WasifVernam>>) -> Self {
-        Self { vernam_url, cipher }
+    pub fn new(_vernam_url: String, cipher: Arc<Mutex<WasifVernam>>) -> Self {
+        Self { cipher }
     }
 
     /// Start the background entropy refresh task
@@ -508,30 +507,22 @@ impl ContinuousEntropyRefresher {
         });
     }
 
-    /// Fetch fresh entropy from worker and refresh the cipher
+    /// Fetch fresh entropy using LOCAL CSPRNG (no worker call to avoid duplicates)
+    /// The TrueVernamFetcher already mixes local+worker+swarm every 10 seconds,
+    /// so this refresher only needs to add LOCAL entropy for forward secrecy.
     async fn fetch_and_refresh(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!(
-            "{}/entropy?size=32&n=10",
-            self.vernam_url.trim_end_matches('/')
-        );
-        let response = reqwest::get(&url).await?;
+        // Use local CSPRNG instead of fetching from worker
+        // (TrueVernamFetcher already handles worker+swarm mixing)
+        let mut fresh_entropy = [0u8; 32];
+        getrandom::getrandom(&mut fresh_entropy)?;
 
-        if !response.status().is_success() {
-            return Err(format!("Failed to fetch entropy: {}", response.status()).into());
-        }
-
-        let body = response.text().await?;
-        let json: serde_json::Value = serde_json::from_str(&body)?;
-        let entropy_hex = json["entropy"].as_str().ok_or("Missing entropy field")?;
-        let fresh_entropy = hex::decode(entropy_hex)?;
-
-        // Refresh the cipher's seed with fresh entropy
+        // Refresh the cipher's seed with LOCAL fresh entropy
         {
             let mut cipher = self.cipher.lock().await;
             cipher.refresh_entropy(&fresh_entropy);
         }
 
-        info!("🔄 Continuous entropy refresh complete - TRUE forward secrecy active!");
+        info!("🔄 Continuous entropy refresh complete (local CSPRNG) - forward secrecy active!");
         Ok(())
     }
 }
