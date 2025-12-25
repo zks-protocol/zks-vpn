@@ -991,16 +991,26 @@ impl P2PRelay {
                     info!("🎲 Fetching Swarm Entropy from relay...");
                     match keys.lock().await.fetch_remote_key(vernam_url).await {
                         Ok(()) => {
-                            // Send the entropy to Exit Peer
+                            // Send the entropy to Exit Peer (non-blocking - continue even if fails)
                             let entropy_msg = KeyExchangeMessage::new_shared_entropy(
                                 keys.lock().await.get_remote_key(),
                             );
-                            writer
+                            match writer
                                 .lock()
                                 .await
                                 .send(Message::Text(entropy_msg.to_json()))
-                                .await?;
-                            info!("✅ Sent Swarm Entropy to Exit Peer (Double-Key active)");
+                                .await
+                            {
+                                Ok(()) => {
+                                    info!("✅ Sent Swarm Entropy to Exit Peer (Double-Key active)");
+                                }
+                                Err(e) => {
+                                    warn!("Failed to send entropy to Exit Peer: {}. Continuing with local entropy.", e);
+                                }
+                            }
+                            info!(
+                                "Fetched Swarm Entropy seed from worker - Infinite Vernam active!"
+                            );
                         }
                         Err(e) => {
                             warn!("Failed to fetch swarm entropy: {}. Using ChaCha20 only.", e);

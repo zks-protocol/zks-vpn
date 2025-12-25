@@ -13,8 +13,7 @@ use windows_sys::Win32::{
     Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA, ERROR_SUCCESS},
     NetworkManagement::IpHelper::{
         CreateIpForwardEntry2, DeleteIpForwardEntry2, GetAdaptersAddresses,
-        InitializeIpForwardEntry, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-        GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
+        InitializeIpForwardEntry, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
         MIB_IPFORWARD_ROW2,
     },
     Networking::WinSock::{NlroManual, AF_INET, AF_UNSPEC, MIB_IPPROTO_NETMGMT},
