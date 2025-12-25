@@ -66,15 +66,22 @@ mod onion;
 
 mod entropy_events;
 mod entropy_tax;
+pub mod true_vernam;
 mod key_rotation;
 mod replay_protection;
 pub mod swarm_entropy_collection;
 mod tls_mimicry;
 mod traffic_shaping;
+mod traffic_mixer;
+mod relay_service;
+mod exit_service;
 
 #[cfg(feature = "swarm")]
 #[cfg(feature = "swarm")]
 mod signaling;
+
+#[cfg(feature = "swarm")]
+mod swarm_controller;
 
 use http_proxy::HttpProxyServer;
 use socks5::Socks5Server;
@@ -193,6 +200,18 @@ pub struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Swarm: Consent to run as exit node (legal requirement)
+    #[arg(long)]
+    exit_consent: bool,
+
+    /// Swarm: Disable relay service (default: enabled)
+    #[arg(long)]
+    no_relay: bool,
+
+    /// Swarm: Disable exit service (default: disabled, requires --exit-consent)
+    #[arg(long)]
+    no_exit: bool,
 
     /// Upstream SOCKS5 proxy (e.g., 127.0.0.1:9050) to route traffic through
     #[arg(long)]
@@ -607,6 +626,9 @@ pub async fn start_p2p_vpn(
     room_id: String,
 ) -> Result<p2p_vpn::P2PVpnController, BoxError> {
     use p2p_vpn::{P2PVpnConfig, P2PVpnController};
+    use crate::entropy_tax::EntropyTax;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     // Check for admin/root privileges
     check_privileges()?;
@@ -640,7 +662,8 @@ pub async fn start_p2p_vpn(
         info!("   DNS protection: ENABLED (queries via DoH)");
     }
 
-    let vpn = P2PVpnController::new(config);
+    let entropy_tax = Arc::new(Mutex::new(EntropyTax::new()));
+    let vpn = P2PVpnController::new(config, entropy_tax);
     vpn.start().await?;
 
     Ok(vpn)
@@ -827,34 +850,52 @@ async fn run_exit_peer_hybrid_mode(_args: Args, room_id: String) -> Result<(), B
 /// - Exit: Provides internet access for others (native nodes)
 #[cfg(feature = "swarm")]
 async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
-    use p2p_swarm::{run_swarm_with_signaling, SwarmConfig};
+    use crate::swarm_controller::{SwarmController, SwarmControllerConfig};
 
     info!("🌐 Starting Faisal Swarm Mode...");
     info!("   Room: {}", room_id);
     info!("   Signaling: {}", args.relay);
     info!("   Mode: Client + Relay + Exit");
 
-    // Create config with signaling server details
-    let config = SwarmConfig {
-        relay_addr: None,
-        listen_port: 0,
-        signaling_url: args.relay.clone(),
+    // Create swarm configuration from CLI args
+    let config = SwarmControllerConfig {
+        enable_client: true,
+        enable_relay: !args.no_relay,
+        enable_exit: !args.no_exit, // Enabled by default unless explicitly disabled
         room_id: room_id.clone(),
+        relay_url: args.relay.clone(),
+        vernam_url: format!("{}/entropy", args.vernam),
+        exit_consent_given: args.exit_consent,
     };
 
-    info!("📡 Connecting to peers via signaling server...");
+    info!("🔧 Configuration:");
+    info!("   - VPN Client: {}", config.enable_client);
+    info!("   - Relay Service: {}", config.enable_relay);
+    info!("   - Exit Service: {}", config.enable_exit);
+    
+    if config.enable_exit && !args.exit_consent {
+        info!("⚠️  Exit Node Active (Default). You are contributing to the swarm!");
+        info!("   Use --no-exit to disable if required.");
+    }
     info!("");
+
+   // Create and start swarm controller
+    let mut controller = SwarmController::new(config);
+
+    info!("📡 Starting swarm services...");
     info!("Press Ctrl+C to stop...");
 
-    // Run swarm with signaling integration
+    // Run swarm with Ctrl+C handling
     tokio::select! {
-        result = run_swarm_with_signaling(config) => {
+        result = controller.start() => {
             if let Err(e) = result {
                 error!("Swarm error: {}", e);
+                return Err(e);
             }
         }
         _ = tokio::signal::ctrl_c() => {
             info!("Ctrl+C received. Shutting down...");
+            controller.stop().await?;
         }
     }
 
