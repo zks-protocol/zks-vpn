@@ -22,7 +22,7 @@ jobs:
       - name: Check zks-tunnel-proto
         run: cargo check -p zks-tunnel-proto
       - name: Check zks-tunnel-client (VPN)
-        run: cargo check -p zks-tunnel-client --features vpn
+        run: cargo check -p zks-tunnel-client --features vpn,swarm,quantum
       - name: Check zks-tunnel-worker (WASM)
         run: cargo check -p zks-tunnel-worker --target wasm32-unknown-unknown
       - name: Check zks-tunnel-relay (WASM)
@@ -36,7 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --all-features --verbose
 
   fmt:
     name: Format
@@ -60,7 +60,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
-        run: cargo clippy --workspace --features vpn -- -D warnings
+        run: cargo clippy --workspace --features vpn,swarm,quantum -- -D warnings
 
   build-client:
     name: Build Client
@@ -84,7 +84,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release
-        run: cargo build --release -p zks-tunnel-client --features vpn --target ${{ matrix.target }}
+        run: cargo build --release -p zks-tunnel-client --features vpn,swarm,quantum --target ${{ matrix.target }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
