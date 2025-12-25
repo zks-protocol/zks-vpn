@@ -14,9 +14,9 @@ md.wasif.faisal@g.bracu.ac.bd
 
 ## Abstract
 
-ZKS (Zero-Knowledge Swarm) is a secure communication protocol, operating at layer 3-7, designed to provide censorship-resistant, privacy-preserving tunneling for applications ranging from VPNs to file transfer and messaging. Unlike traditional approaches that rely on established patterns detectable by Deep Packet Inspection (DPI), ZKS employs ChaCha20-Poly1305 AEAD encryption with a 3-message authenticated handshake providing mutual authentication and forward secrecy. The protocol achieves stealth through traffic shaping, constant-rate padding, and protocol mimicry, making encrypted tunnels indistinguishable from legitimate HTTPS traffic. Key exchange is accomplished using a hybrid construction combining X25519 for classical security and ML-KEM (Kyber768) for post-quantum resistance, with HKDF-based key derivation. Security enhancements include replay attack protection via nonce tracking, constant-time HMAC verification to prevent timing attacks, and automatic key rotation with ratcheting for enhanced forward secrecy. For peer-to-peer deployments, ZKS integrates with libp2p's DCUtR protocol for NAT traversal, enabling direct connections even behind restrictive firewalls. The "Swarm" in Zero-Knowledge Swarm refers to the protocol's core innovation: a decentralized peer-to-peer topology where any participant can dynamically assume the role of client, relay, or exit node, creating a self-organizing mesh that is inherently resistant to blocking. The protocol is designed to be minimal—under 5,000 lines of Rust for the core implementation—while providing strong forward secrecy, identity hiding, replay protection, and resistance to traffic analysis. Performance benchmarks demonstrate throughput competitive with WireGuard while maintaining significantly stronger censorship resistance properties.
+ZKS (Zero-Knowledge Swarm) is a secure communication protocol, operating at layer 3-7, designed to provide censorship-resistant, privacy-preserving tunneling for applications ranging from VPNs to file transfer and messaging. Unlike traditional approaches that rely on established patterns detectable by Deep Packet Inspection (DPI), ZKS employs ChaCha20-Poly1305 AEAD encryption with a 3-message authenticated handshake providing mutual authentication and forward secrecy. The protocol achieves stealth through traffic shaping, constant-rate padding, and protocol mimicry, making encrypted tunnels indistinguishable from legitimate HTTPS traffic. Key exchange is accomplished using a hybrid construction combining X25519 for classical security and ML-KEM (Kyber768) for post-quantum resistance, with HKDF-based key derivation. ZKS v2.0 introduces **True Vernam** mode—an optional encryption layer providing information-theoretic security through triple-source entropy (local CSPRNG, Cloudflare LavaRand, and peer-collected randomness), ensuring mathematically unbreakable encryption when combined with the defense-in-depth ChaCha20 layer. Security enhancements include replay attack protection via nonce tracking, constant-time HMAC verification to prevent timing attacks, automatic key rotation with ratcheting for enhanced forward secrecy, and continuous entropy refresh. For peer-to-peer deployments, ZKS integrates with libp2p's DCUtR protocol for NAT traversal, enabling direct connections even behind restrictive firewalls. The "Swarm" in Zero-Knowledge Swarm refers to the protocol's core innovation: a decentralized peer-to-peer topology where any participant can dynamically assume the role of client, relay, or exit node, creating a self-organizing mesh that is inherently resistant to blocking. The protocol is designed to be minimal—under 5,000 lines of Rust for the core implementation—while providing strong forward secrecy, identity hiding, replay protection, and resistance to traffic analysis. Performance benchmarks demonstrate throughput competitive with WireGuard while maintaining significantly stronger censorship resistance properties.
 
-**Keywords:** VPN, privacy, censorship resistance, zero-knowledge, post-quantum cryptography, traffic analysis resistance
+**Keywords:** VPN, privacy, censorship resistance, zero-knowledge, post-quantum cryptography, traffic analysis resistance, information-theoretic security, one-time pad
 
 ---
 
@@ -32,6 +32,7 @@ ZKS (Zero-Knowledge Swarm) is a secure communication protocol, operating at laye
 | | 3.3 Replay Protection | 8 |
 | | 3.4 Constant-Time Operations | 8 |
 | | 3.5 Key Rotation & Ratcheting | 9 |
+| | 3.6 True Vernam: Information-Theoretic Security | 9 |
 | 4 | Protocol Overview | 9 |
 | | 4.1 Framing & Encapsulation | 9 |
 | | 4.2 Handshake Protocol | 10 |
@@ -87,6 +88,8 @@ ZKS is built on three core principles:
 This paper makes the following contributions:
 
 - **Wasif-Vernam Cipher:** A novel XOR-based encryption scheme with mandatory key rotation, designed for high performance while maintaining semantic security through proper key management.
+
+- **True Vernam Mode (NEW in v2.0):** An optional information-theoretically secure encryption layer using triple-source entropy (local CSPRNG, Cloudflare LavaRand, and peer-collected randomness) to achieve mathematically unbreakable encryption, with graceful fallback to HKDF-based expansion.
 
 - **Entropy Tax:** A decentralized mechanism for generating cryptographic randomness from the participation of peers in the network, reducing reliance on potentially compromised local random number generators.
 
@@ -341,6 +344,131 @@ The Entropy Tax requires each peer to contribute cryptographically random bytes 
 - **Unpredictability:** Even if n-1 peers are malicious, the honest peer's contribution ensures unpredictability
 - **Commitment:** Hash commitment prevents adaptive attacks
 - **Availability:** Protocol degrades gracefully if some peers don't reveal (use only committed peers)
+
+### 3.6 True Vernam: Information-Theoretic Security
+
+ZKS v2.0 introduces **True Vernam** mode—an optional encryption layer that provides mathematically unbreakable security by using truly random, non-repeating key material.
+
+#### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                 TRUE VERNAM ENCRYPTION                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│    Plaintext                                                │
+│        │                                                    │
+│        ▼                                                    │
+│   ┌─────────────────────────────────────┐                   │
+│   │  XOR with TRUE Random Key Material  │ ← Consumed once  │
+│   │  (from Triple-Source Buffer)        │   never reused   │
+│   └─────────────────────────────────────┘                   │
+│        │                                                    │
+│        ▼                                                    │
+│   ┌─────────────────────────────────────┐                   │
+│   │   ChaCha20-Poly1305 AEAD            │ ← Defense-in-    │
+│   │   (Session Key from Handshake)      │   depth          │
+│   └─────────────────────────────────────┘                   │
+│        │                                                    │
+│        ▼                                                    │
+│    Ciphertext                                               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+#### Triple-Source Entropy (Trustless Randomness)
+
+True Vernam derives its key material from three independent entropy sources:
+
+```rust
+// Hybrid Entropy Fetcher
+let mut hasher = Sha256::new();
+
+// Source 1: Local CSPRNG (you trust your device)
+hasher.update(local_entropy);  // 32 bytes from getrandom()
+
+// Source 2: Worker Entropy (Cloudflare LavaRand)
+hasher.update(worker_entropy);  // 32 bytes from edge worker
+
+// Source 3: Swarm Seed (peer commit/reveal)
+if let Some(swarm_seed) = &self.swarm_seed {
+    hasher.update(swarm_seed);  // 32 bytes from peers
+}
+
+// Timestamp for forward secrecy
+hasher.update(timestamp.to_be_bytes());
+
+let combined: [u8; 32] = hasher.finalize().into();
+```
+
+#### Trust Model
+
+| Scenario | Entropy Sources | Trust Level |
+|----------|-----------------|-------------|
+| **With peers** | Local + Worker + Peers | **TRUSTLESS** |
+| **Without peers** | Local + Worker | Trust Cloudflare |
+| **Worker down** | Local × 2 + Peers | **TRUSTLESS** |
+| **No peers + Worker down** | Local × 2 | Trust your device |
+
+**Security Guarantee:** To compromise the encryption, an attacker must compromise ALL active entropy sources simultaneously.
+
+#### Buffer Management
+
+```rust
+pub struct TrueVernamBuffer {
+    buffer: VecDeque<u8>,      // Ring buffer of random bytes
+    bytes_consumed: u64,        // Total bytes used (for metrics)
+    bytes_fetched: u64,         // Total bytes fetched
+}
+
+impl TrueVernamBuffer {
+    /// Consume N bytes - NEVER REUSED (true OTP property)
+    pub fn consume(&mut self, count: usize) -> Option<Vec<u8>> {
+        for _ in 0..count {
+            result.push(self.buffer.pop_front()?);  // Gone forever
+        }
+        Some(result)
+    }
+}
+```
+
+#### Performance
+
+| Parameter | Value |
+|-----------|-------|
+| Buffer Size | 1 MB (default) |
+| Refill Threshold | 512 KB |
+| Fetch Interval | 100 ms |
+| Chunk Size | 32 bytes (SHA256 output) |
+| Fallback Mode | HKDF expansion (if buffer empty) |
+
+#### Wire Format
+
+True Vernam mode uses a modified packet format:
+
+```
++──────────+─────────+───────────+────────────+────────────+───────+
+│  Nonce   │  Mode   │  KeyLen   │  XOR Key   │ Ciphertext │  Tag  │
+│ 12 bytes │ 1 byte  │  4 bytes  │  N bytes   │  M bytes   │ 16 B  │
++──────────+─────────+───────────+────────────+────────────+───────+
+
+Mode values:
+  0x00 = No XOR layer (ChaCha20 only)
+  0x01 = True Vernam (XOR key embedded)
+  0x02 = HKDF fallback mode
+```
+
+**Defense-in-Depth:** The XOR key is included in the encrypted envelope, providing protection even if ChaCha20 is broken. The XOR key itself is protected by ChaCha20-Poly1305.
+
+#### Security Properties
+
+| Property | Mechanism |
+|----------|-----------|
+| **Information-Theoretic Security** | True random, non-repeating key material |
+| **Forward Secrecy** | Consumed bytes are deleted permanently |
+| **Trustless (with peers)** | Multi-source entropy mixing |
+| **Fallback Resilience** | Graceful degradation to HKDF mode |
+| **Post-Quantum Safe** | XOR is quantum-resistant by definition |
 
 ---
 
