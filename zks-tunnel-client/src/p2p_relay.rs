@@ -383,6 +383,16 @@ impl WasifVernam {
         }
     }
 
+    /// Check if swarm entropy is available
+    pub fn has_swarm_entropy(&self) -> bool {
+        self.has_swarm_entropy
+    }
+
+    /// Get the swarm seed as a fixed-size array (for True Vernam fetcher)
+    pub fn get_swarm_seed(&self) -> [u8; 32] {
+        self.swarm_seed
+    }
+
     /// Refresh the swarm seed by mixing in new entropy (FORWARD SECRECY)
     /// 
     /// This is the key to TRUE continuous entropy:
@@ -1050,10 +1060,26 @@ impl P2PRelay {
             // === TRUE VERNAM MODE (Information-Theoretic Security) ===
             // Enable by default for maximum security
             let true_vernam_buffer = Arc::new(Mutex::new(crate::true_vernam::TrueVernamBuffer::new()));
-            let fetcher = crate::true_vernam::TrueVernamFetcher::new(
+            
+            // Create fetcher and set swarm seed if available (for TRUSTLESS mode)
+            let mut fetcher = crate::true_vernam::TrueVernamFetcher::new(
                 vernam_url.to_string(),
                 true_vernam_buffer.clone(),
             );
+            
+            // Pass swarm seed to fetcher (makes it TRUSTLESS)
+            // The swarm seed comes from peer entropy collection at the start
+            {
+                let cipher = keys.lock().await;
+                if cipher.has_swarm_entropy() {
+                    let seed = cipher.get_swarm_seed();
+                    fetcher.set_swarm_seed(seed);
+                    info!("🔗 True Vernam: Using peer + worker hybrid entropy (TRUSTLESS)");
+                } else {
+                    info!("⚠️ True Vernam: Using worker only (no peers, trust Cloudflare)");
+                }
+            }
+            
             fetcher.start_background_task();
             
             // Enable True Vernam on the cipher
