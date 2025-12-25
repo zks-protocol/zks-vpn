@@ -73,7 +73,26 @@ pub async fn create_swarm(
     // Uses QUIC (lower latency, better NAT) + TCP (firewall fallback) + DNS + Relay
     // Chain order from official libp2p DCUtR example:
     // with_tcp() -> with_quic() -> with_dns()? -> with_relay_client()
-    let mut swarm = SwarmBuilder::with_new_identity()
+    // Load or generate identity
+    let id_keys = match load_identity() {
+        Ok(keys) => {
+            info!(
+                "🔑 Loaded existing identity: {}",
+                keys.public().to_peer_id()
+            );
+            keys
+        }
+        Err(_) => {
+            info!("🆕 Generating new identity...");
+            let keys = libp2p::identity::Keypair::generate_ed25519();
+            if let Err(e) = save_identity(&keys) {
+                warn!("⚠️ Failed to save identity: {}", e);
+            }
+            keys
+        }
+    };
+
+    let mut swarm = SwarmBuilder::with_existing_identity(id_keys)
         .with_tokio()
         // TCP transport with Noise encryption (firewall-friendly fallback)
         .with_tcp(
@@ -144,67 +163,79 @@ pub async fn create_swarm(
 #[cfg(feature = "swarm")]
 pub async fn run_swarm_loop(
     mut swarm: Swarm<SwarmBehaviour>,
+    room_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("🔄 Starting swarm event loop...");
 
+    let mut discovery_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+
     loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => {
-                info!("✅ Listening on: {}", address);
+        tokio::select! {
+            _ = discovery_interval.tick() => {
+                let room_key = kad::RecordKey::new(&room_id.as_bytes());
+                swarm.behaviour_mut().kademlia.get_providers(room_key);
+                debug!("🔍 Periodic DHT search for peers...");
             }
-            SwarmEvent::ConnectionEstablished {
-                peer_id, endpoint, ..
-            } => {
-                // Show transport type used (QUIC or TCP)
-                let addr = endpoint.get_remote_address().to_string();
-                let transport = if addr.contains("quic") {
-                    "QUIC ⚡"
-                } else {
-                    "TCP 🔌"
-                };
-                info!(
-                    "🤝 Connected to peer: {} via {} [{}]",
-                    peer_id, transport, addr
-                );
-            }
-            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                debug!("🔌 Disconnected from peer: {} ({:?})", peer_id, cause);
-            }
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::Dcutr(event)) => {
-                info!("🎯 DCUtR event: {:?}", event);
-            }
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::RelayClient(event)) => {
-                info!("📡 Relay event: {:?}", event);
-            }
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::Identify(event)) => {
-                debug!("🔍 Identify event: {:?}", event);
-            }
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::Ping(event)) => {
-                debug!("🏓 Ping event: {:?}", event);
-            }
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(
-                kad::Event::OutboundQueryProgressed {
-                    result:
-                        kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
-                            providers,
+            event = swarm.select_next_some() => {
+                match event {
+                    SwarmEvent::NewListenAddr { address, .. } => {
+                        info!("✅ Listening on: {}", address);
+                    }
+                    SwarmEvent::ConnectionEstablished {
+                        peer_id, endpoint, ..
+                    } => {
+                        // Show transport type used (QUIC or TCP)
+                        let addr = endpoint.get_remote_address().to_string();
+                        let transport = if addr.contains("quic") {
+                            "QUIC ⚡"
+                        } else {
+                            "TCP 🔌"
+                        };
+                        info!(
+                            "🤝 Connected to peer: {} via {} [{}]",
+                            peer_id, transport, addr
+                        );
+                    }
+                    SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                        debug!("🔌 Disconnected from peer: {} ({:?})", peer_id, cause);
+                    }
+                    SwarmEvent::Behaviour(SwarmBehaviourEvent::Dcutr(event)) => {
+                        info!("🎯 DCUtR event: {:?}", event);
+                    }
+                    SwarmEvent::Behaviour(SwarmBehaviourEvent::RelayClient(event)) => {
+                        info!("📡 Relay event: {:?}", event);
+                    }
+                    SwarmEvent::Behaviour(SwarmBehaviourEvent::Identify(event)) => {
+                        debug!("🔍 Identify event: {:?}", event);
+                    }
+                    SwarmEvent::Behaviour(SwarmBehaviourEvent::Ping(event)) => {
+                        debug!("🏓 Ping event: {:?}", event);
+                    }
+                    SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(
+                        kad::Event::OutboundQueryProgressed {
+                            result:
+                                kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                                    providers,
+                                    ..
+                                })),
                             ..
-                        })),
-                    ..
-                },
-            )) => {
-                for peer_id in providers {
-                    info!("🕸️ DHT found peer: {}", peer_id);
-                    // Swarm will automatically try to connect if we dial or if they are in our routing table?
-                    // No, we should explicitly dial them if we are not connected.
-                    // But for now, just logging. Kademlia might auto-connect depending on config.
-                    // Let's explicitly dial.
-                    let _ = swarm.dial(peer_id);
+                        },
+                    )) => {
+                        for peer_id in providers {
+                            info!("🕸️ DHT found peer: {}", peer_id);
+                            // Swarm will automatically try to connect if we dial or if they are in our routing table?
+                            // No, we should explicitly dial them if we are not connected.
+                            // But for now, just logging. Kademlia might auto-connect depending on config.
+                            // Let's explicitly dial.
+                            let _ = swarm.dial(peer_id);
+                        }
+                    }
+                    SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(event)) => {
+                        debug!("🕸️ Kademlia event: {:?}", event);
+                    }
+                    _ => {}
                 }
             }
-            SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(event)) => {
-                debug!("🕸️ Kademlia event: {:?}", event);
-            }
-            _ => {}
         }
     }
 }
@@ -300,5 +331,33 @@ pub async fn run_swarm_with_signaling(
     }
 
     // Run the main event loop
-    run_swarm_loop(swarm).await
+    run_swarm_loop(swarm, config.room_id).await
+}
+
+/// Load identity keypair from file
+fn load_identity() -> Result<libp2p::identity::Keypair, Box<dyn std::error::Error + Send + Sync>> {
+    let mut path = std::env::current_exe()?;
+    path.pop();
+    path.push("identity.pem");
+
+    if !path.exists() {
+        return Err("Identity file not found".into());
+    }
+
+    let bytes = std::fs::read(&path)?;
+    let keypair = libp2p::identity::Keypair::from_protobuf_encoding(&bytes)?;
+    Ok(keypair)
+}
+
+/// Save identity keypair to file
+fn save_identity(
+    keypair: &libp2p::identity::Keypair,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut path = std::env::current_exe()?;
+    path.pop();
+    path.push("identity.pem");
+
+    let bytes = keypair.to_protobuf_encoding()?;
+    std::fs::write(&path, bytes)?;
+    Ok(())
 }
