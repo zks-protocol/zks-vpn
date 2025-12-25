@@ -271,12 +271,11 @@ Each user uses:      Their own bandwidth
 **Verdict:** ZKS keeps the *Speed* of P2P but adds the *Privacy* of Tor.
 
 ### 7.4 Smart Peer Selection (Auto-Latency)
-
 To ensure high performance (e.g., 4K streaming), the client automatically selects the fastest peers:
 
 1.  **Discovery**: Client retrieves a batch of active peers from the signaling server.
-2.  **Probing**: Client sends lightweight UDP/TCP pings to candidate peers.
-3.  **Ranking**: Peers are ranked by Round-Trip Time (RTT) and Jitter.
+2.  **Probing**: Client sends lightweight `libp2p::ping` probes to candidate peers.
+3.  **Ranking**: Peers are ranked by **Round-Trip Time (RTT)** and Jitter.
 4.  **Selection**:
     *   **Relay Peer**: Chosen for lowest latency to Client.
     *   **Exit Peer**: Chosen for lowest latency to Target (or general high bandwidth).
