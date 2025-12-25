@@ -31,10 +31,8 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
         let mut buffer: Vec<u8> = vec![0; BUFFER_SIZE];
         let mut buffer_size = buffer.len() as u32;
 
-        let flags = GAA_FLAG_SKIP_ANYCAST
-            | GAA_FLAG_SKIP_MULTICAST
-            | GAA_FLAG_SKIP_DNS_SERVER;
-            // Note: Removed GAA_FLAG_SKIP_FRIENDLY_NAME to allow searching by FriendlyName
+        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+        // Note: Removed GAA_FLAG_SKIP_FRIENDLY_NAME to allow searching by FriendlyName
 
         let status = GetAdaptersAddresses(
             AF_UNSPEC as u32,
@@ -64,10 +62,9 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
             }
         }
 
-
         let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
         let mut all_adapters: Vec<String> = Vec::new();
-        
+
         while !adapter.is_null() {
             let adapter_ref = &*adapter;
             let pattern_lower = name_pattern.to_lowercase();
@@ -80,7 +77,10 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
                 all_adapters.push(format!("{}(idx:{})", adapter_name, index));
 
                 if adapter_name.to_lowercase().contains(&pattern_lower) {
-                    info!("Found TUN adapter by AdapterName: {} (index: {})", adapter_name, index);
+                    info!(
+                        "Found TUN adapter by AdapterName: {} (index: {})",
+                        adapter_name, index
+                    );
                     return Ok(index);
                 }
             }
@@ -89,9 +89,12 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
             if !adapter_ref.FriendlyName.is_null() {
                 // FriendlyName is a wide string (PWSTR)
                 let friendly_name = widestring_to_string(adapter_ref.FriendlyName);
-                
+
                 if friendly_name.to_lowercase().contains(&pattern_lower) {
-                    info!("Found TUN adapter by FriendlyName: {} (index: {})", friendly_name, index);
+                    info!(
+                        "Found TUN adapter by FriendlyName: {} (index: {})",
+                        friendly_name, index
+                    );
                     return Ok(index);
                 }
             }
@@ -99,9 +102,12 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
             // Check Description (e.g., "Wintun Tunnel")
             if !adapter_ref.Description.is_null() {
                 let description = widestring_to_string(adapter_ref.Description);
-                
+
                 if description.to_lowercase().contains(&pattern_lower) {
-                    info!("Found TUN adapter by Description: {} (index: {})", description, index);
+                    info!(
+                        "Found TUN adapter by Description: {} (index: {})",
+                        description, index
+                    );
                     return Ok(index);
                 }
             }
@@ -120,7 +126,7 @@ fn widestring_to_string(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    
+
     unsafe {
         let mut len = 0;
         while *ptr.add(len) != 0 {

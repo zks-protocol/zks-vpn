@@ -251,7 +251,7 @@ impl TrueVernamFetcher {
 
         let body = response.text().await?;
         let json: serde_json::Value = serde_json::from_str(&body)?;
-        
+
         // Handle both single entropy response and array of entropy values
         if let Some(entropy_hex) = json["entropy"].as_str() {
             // Single entropy value

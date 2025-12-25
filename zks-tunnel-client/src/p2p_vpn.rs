@@ -466,7 +466,8 @@ mod implementation {
 
                 // Get TUN interface index for route deletion (try wintun first, then tun)
                 if let Ok(tun_if_index) = windows_routing::get_tun_interface_index("wintun")
-                    .or_else(|_| windows_routing::get_tun_interface_index(&self.config.device_name)) {
+                    .or_else(|_| windows_routing::get_tun_interface_index(&self.config.device_name))
+                {
                     let tun_ip = self.config.address;
 
                     // Remove IPv4 split-tunnel routes using Win32 API
@@ -746,7 +747,10 @@ mod implementation {
                         name
                     }
                     Err(e) => {
-                        warn!("Could not get device name: {}, will try pattern matching", e);
+                        warn!(
+                            "Could not get device name: {}, will try pattern matching",
+                            e
+                        );
                         self.config.device_name.clone()
                     }
                 };
@@ -758,11 +762,16 @@ mod implementation {
 
                     // Get TUN interface index using the ACTUAL device name from tun-rs
                     // On Windows, Wintun creates adapters with GUID-like names
-                    let tun_if_index = match windows_routing::get_tun_interface_index(&actual_device_name) {
+                    let tun_if_index = match windows_routing::get_tun_interface_index(
+                        &actual_device_name,
+                    ) {
                         Ok(idx) => idx,
                         Err(e) => {
                             // Fallback: try searching by description "Wintun" if name search fails
-                            warn!("Device name '{}' not found, trying Wintun pattern...", actual_device_name);
+                            warn!(
+                                "Device name '{}' not found, trying Wintun pattern...",
+                                actual_device_name
+                            );
                             match windows_routing::get_tun_interface_index("wintun") {
                                 Ok(idx) => idx,
                                 Err(_) => {
