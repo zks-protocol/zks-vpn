@@ -680,6 +680,25 @@ If hole punching fails after 3 attempts, traffic is relayed through R. The relay
 
 In Swarm Mode (the default configuration), all participants are **Client + Relay + Exit** nodes. This "True Swarm" topology ensures maximum decentralization and plausible deniability, as every node contributes bandwidth and exit capacity to the network. Users can opt-out of specific roles (e.g., `--no-exit`) if desired.
 
+### 5.4 Secure File Transfer (Private Torrent)
+
+ZKS leverages its P2P architecture to offer a **private, unblockable alternative to BitTorrent**.
+
+| Feature | BitTorrent | ZKS Swarm |
+|---------|------------|-----------|
+| **Transport** | UDP/TCP (Blockable) | Encrypted Tunnel (Unblockable) |
+| **Privacy** | Public Swarm (IP Visible) | Triple-Blind (IP Hidden) |
+| **Discovery** | Trackers/DHT (Public) | Private DHT + Signaling |
+| **Speed** | Direct P2P | Direct P2P (via DCUtR) |
+
+**Mechanism:**
+1.  **Sender** generates a one-time ticket (capability-based access).
+2.  **Receiver** uses the ticket to locate the sender via the Swarm DHT.
+3.  **Connection** is established via DCUtR (hole-punching).
+4.  **Transfer** occurs over the Wasif-Vernam encrypted tunnel.
+
+This allows for high-speed, 1-to-1 or 1-to-many file sharing that is invisible to ISPs and censors.
+
 ---
 
 ## 6 Censorship Resistance Techniques
