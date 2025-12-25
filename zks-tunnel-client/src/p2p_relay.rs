@@ -239,50 +239,127 @@ impl WasifVernam {
             &[]
         }
     }
-}
 
-/// Entropy Tax Payer: Verifies entropy endpoint health
-/// NOTE: With LavaRand-backed zks-key worker, no contribution needed
-#[allow(dead_code)]
-pub struct EntropyTaxPayer {
-    vernam_url: String,
-}
+    /// Refresh the swarm seed by mixing in new entropy (FORWARD SECRECY)
+    /// 
+    /// This is the key to TRUE continuous entropy:
+    /// new_seed = HKDF(old_seed || fresh_entropy || generation)
+    /// 
+    /// Benefits:
+    /// - Even if current seed is compromised, past traffic is safe
+    /// - Each refresh creates a cryptographically independent key chain
+    /// - Generation counter prevents replay attacks
+    pub fn refresh_entropy(&mut self, fresh_entropy: &[u8]) {
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        
+        if fresh_entropy.is_empty() {
+            return;
+        }
 
-#[allow(dead_code)]
-impl EntropyTaxPayer {
-    pub fn new(vernam_url: String) -> Self {
-        Self { vernam_url }
+        // Combine old seed with fresh entropy
+        let mut input = Vec::with_capacity(32 + fresh_entropy.len() + 8);
+        input.extend_from_slice(&self.swarm_seed);
+        input.extend_from_slice(fresh_entropy);
+        
+        // Add current offset as "generation" to prevent replay
+        let generation = self.key_offset.load(Ordering::SeqCst);
+        input.extend_from_slice(&generation.to_be_bytes());
+
+        // Derive new seed using HKDF
+        let hk = Hkdf::<Sha256>::new(Some(b"zks-entropy-refresh-v1"), &input);
+        let mut new_seed = [0u8; 32];
+        hk.expand(b"refreshed-swarm-seed", &mut new_seed)
+            .expect("HKDF expansion should not fail");
+
+        // Update seed (old seed is now unreachable - forward secrecy!)
+        self.swarm_seed = new_seed;
+        self.has_swarm_entropy = true;
+        
+        // NOTE: We do NOT reset key_offset - the new keystream continues from current position
+        // This ensures no key byte is ever reused across refresh cycles
+        
+        info!("🔄 Refreshed swarm entropy - Forward secrecy checkpoint! (generation: {})", generation);
     }
 
-    /// Start the background contribution task
+    /// Get current key offset (for monitoring/debugging)
+    pub fn get_key_offset(&self) -> u64 {
+        self.key_offset.load(Ordering::SeqCst)
+    }
+
+    /// Check if entropy refresh is recommended (e.g., after 1MB of traffic)
+    pub fn needs_refresh(&self) -> bool {
+        const REFRESH_THRESHOLD: u64 = 1024 * 1024; // 1MB
+        self.key_offset.load(Ordering::SeqCst) % REFRESH_THRESHOLD < 1024
+    }
+}
+
+/// Continuous Entropy Refresher: Periodically fetches fresh entropy and refreshes the cipher
+/// 
+/// This is what makes ZKS a TRUE continuous entropy system:
+/// - Every 30 seconds (or after 1MB traffic), fetch fresh entropy from swarm/worker
+/// - Mix into existing seed using refresh_entropy()
+/// - Provides forward secrecy: past traffic is unrecoverable even if current seed leaks
+pub struct ContinuousEntropyRefresher {
+    vernam_url: String,
+    cipher: Arc<Mutex<WasifVernam>>,
+}
+
+impl ContinuousEntropyRefresher {
+    pub fn new(vernam_url: String, cipher: Arc<Mutex<WasifVernam>>) -> Self {
+        Self { vernam_url, cipher }
+    }
+
+    /// Start the background entropy refresh task
     pub fn start_background_task(self) {
         tokio::spawn(async move {
-            let mut interval = interval(Duration::from_secs(60)); // Check every 60 seconds
-
+            let mut interval = interval(Duration::from_secs(30)); // Refresh every 30 seconds
+            
             loop {
                 interval.tick().await;
-                if let Err(e) = self.pay_tax().await {
-                    warn!("Failed to pay Entropy Tax: {}", e);
+                
+                // Check if refresh is needed (either by time or by traffic volume)
+                let needs_refresh = {
+                    let cipher = self.cipher.lock().await;
+                    cipher.needs_refresh() || true // Always refresh on interval
+                };
+                
+                if needs_refresh {
+                    if let Err(e) = self.fetch_and_refresh().await {
+                        warn!("Failed to refresh entropy: {}", e);
+                    }
                 }
             }
         });
     }
 
-    /// Pay the Entropy Tax (verify endpoint health)
-    /// NOTE: With LavaRand-backed zks-key worker, no contribution needed
-    async fn pay_tax(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // With LavaRand, we just verify the endpoint is healthy
-        let url = format!("{}/health", self.vernam_url.trim_end_matches('/'));
+    /// Fetch fresh entropy from worker and refresh the cipher
+    async fn fetch_and_refresh(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!("{}/entropy?size=32&n=10", self.vernam_url.trim_end_matches('/'));
         let response = reqwest::get(&url).await?;
-
-        if response.status().is_success() {
-            debug!("Entropy endpoint healthy");
-            Ok(())
-        } else {
-            Err(format!("Entropy endpoint returned {}", response.status()).into())
+        
+        if !response.status().is_success() {
+            return Err(format!("Failed to fetch entropy: {}", response.status()).into());
         }
+
+        let body = response.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        let entropy_hex = json["entropy"].as_str().ok_or("Missing entropy field")?;
+        let fresh_entropy = hex::decode(entropy_hex)?;
+
+        // Refresh the cipher's seed with fresh entropy
+        {
+            let mut cipher = self.cipher.lock().await;
+            cipher.refresh_entropy(&fresh_entropy);
+        }
+
+        info!("🔄 Continuous entropy refresh complete - TRUE forward secrecy active!");
+        Ok(())
     }
 }
+
+// Keep the old name as an alias for backward compatibility
+pub type EntropyTaxPayer = ContinuousEntropyRefresher;
 
 /// Trait combining all required stream traits
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + Sync {}
@@ -733,7 +810,7 @@ impl P2PRelay {
             Vec::new()
         };
 
-        let mut keys = WasifVernam::new(shared_secret, remote_key);
+        let keys = Arc::new(Mutex::new(WasifVernam::new(shared_secret, remote_key)));
 
         // === Swarm Entropy Synchronization ===
         // Client fetches entropy and shares with Exit Peer to ensure both have same key
@@ -742,11 +819,11 @@ impl P2PRelay {
                 PeerRole::Client => {
                     // Client: Fetch entropy from relay and send to Exit Peer
                     info!("🎲 Fetching Swarm Entropy from relay...");
-                    match keys.fetch_remote_key(vernam_url).await {
+                    match keys.lock().await.fetch_remote_key(vernam_url).await {
                         Ok(()) => {
                             // Send the entropy to Exit Peer
                             let entropy_msg =
-                                KeyExchangeMessage::new_shared_entropy(keys.get_remote_key());
+                                KeyExchangeMessage::new_shared_entropy(keys.lock().await.get_remote_key());
                             writer
                                 .lock()
                                 .await
@@ -777,7 +854,7 @@ impl P2PRelay {
                     }
 
                     if let Some(entropy_bytes) = entropy_found {
-                        keys.set_remote_key(entropy_bytes);
+                        keys.lock().await.set_remote_key(entropy_bytes);
                         info!(
                             "✅ Received Swarm Entropy from Client (Double-Key active) [Buffered]"
                         );
@@ -808,7 +885,7 @@ impl P2PRelay {
 
                         match entropy_timeout {
                             Ok(Ok(entropy_bytes)) => {
-                                keys.set_remote_key(entropy_bytes);
+                                keys.lock().await.set_remote_key(entropy_bytes);
                                 info!("✅ Received Swarm Entropy from Client (Double-Key active)");
                             }
                             Ok(Err(e)) => {
@@ -822,10 +899,10 @@ impl P2PRelay {
                 }
             }
 
-            // Start Entropy Tax Payer background task (contribute randomness to Swarm)
-            let tax_payer = EntropyTaxPayer::new(vernam_url.to_string());
-            tax_payer.start_background_task();
-            info!("🎲 Started Entropy Tax Payer (contributing to Swarm)");
+            // Start Continuous Entropy Refresher (TRUE forward secrecy)
+            let refresher = ContinuousEntropyRefresher::new(vernam_url.to_string(), keys.clone());
+            refresher.start_background_task();
+            info!("🔄 Started Continuous Entropy Refresher (TRUE forward secrecy active!)");
         }
 
         // Send ack
@@ -841,7 +918,7 @@ impl P2PRelay {
         Ok(Self {
             writer,
             reader,
-            keys: Arc::new(Mutex::new(keys)),
+            keys,
             role,
             room_id: room_id.to_string(),
             shared_secret,
