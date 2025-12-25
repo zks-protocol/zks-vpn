@@ -448,7 +448,18 @@ impl VpnRoom {
         let target_role = match sender.role {
             PeerRole::Client => PeerRole::ExitPeer,
             PeerRole::ExitPeer => PeerRole::Client,
-            PeerRole::Swarm => return, // Swarm doesn't use binary relay
+            PeerRole::Swarm => {
+                // Swarm mode: Broadcast binary data to all other swarm peers
+                // This enables a mesh where every peer receives every packet (encrypted)
+                for ws in self.state.get_websockets() {
+                    if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
+                        if session.role == PeerRole::Swarm && session.peer_id != sender.peer_id {
+                            let _ = ws.send_with_bytes(data);
+                        }
+                    }
+                }
+                return;
+            }
         };
 
         for ws in self.state.get_websockets() {
