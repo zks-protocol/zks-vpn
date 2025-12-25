@@ -259,7 +259,18 @@ Each user uses:      Their own bandwidth
 3. **Only 2 Hops**: vs Tor's 3 fixed hops
 4. **Quality Peers**: All users contribute, not just volunteers
 
-### 7.3 Smart Peer Selection (Auto-Latency)
+### 7.3 ZKS vs. Standard P2P (WebRTC/Torrent)
+
+| Feature | Standard P2P | ZKS Swarm |
+|---------|--------------|-----------|
+| **Privacy** | ❌ **Public IP** (Visible to swarm) | ✅ **Triple-Blind** (Hidden behind Relay) |
+| **Censorship** | ❌ **Blockable** (DPI fingerprints) | ✅ **Unblockable** (Looks like HTTPS) |
+| **Security** | ⚠️ **DTLS/SRTP** (Standard) | ✅ **Wasif-Vernam** (Unbreakable) |
+| **Cost** | ✅ Free | ✅ Free (Zero-Cost Architecture) |
+
+**Verdict:** ZKS keeps the *Speed* of P2P but adds the *Privacy* of Tor.
+
+### 7.4 Smart Peer Selection (Auto-Latency)
 
 To ensure high performance (e.g., 4K streaming), the client automatically selects the fastest peers:
 
