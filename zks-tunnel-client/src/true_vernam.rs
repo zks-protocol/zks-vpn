@@ -206,6 +206,8 @@ impl TrueVernamFetcher {
         hasher.update(worker_entropy);
 
         // Add swarm seed if available (TRUSTLESS - even if worker is evil)
+        // Note: This seed is mixed into every batch. Even if it doesn't change often,
+        // the Local/Worker entropy changes every 100ms, ensuring the output is always unique.
         if let Some(swarm_seed) = &self.swarm_seed {
             hasher.update(swarm_seed);
             debug!("🔗 Hybrid entropy: local + worker + swarm (TRUSTLESS)");
