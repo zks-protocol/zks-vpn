@@ -345,7 +345,21 @@ pub struct TrueVernamFetcher {
 
 **Recommendation:** For maximum privacy and reliability, **Self-Host** your own entropy worker or rely on the **Swarm**.
 
-## Comparison with Traditional Ciphers
+**Recommendation:** For maximum privacy and reliability, **Self-Host** your own entropy worker or rely on the **Swarm**.
+
+### Minimum Swarm Size (2 Peers?)
+
+**Yes, 2 peers are enough.**
+
+If you only have 2 peers (e.g., You and a Friend):
+1.  **It Works:** The protocol fully functions with just 2 nodes.
+2.  **Entropy:** You still get **Triple-Source Entropy**.
+    *   The Swarm Seed is derived from *both* of you.
+    *   Even if the seed only updates every few seconds, it is mixed with **fresh** Local/Worker entropy for every single byte.
+    *   **Result:** You get high-speed, infinite entropy even with a small swarm.
+3.  **Topology:** One peer acts as Client, the other as Exit. (Direct P2P Encrypted Tunnel).
+
+**Note:** More peers = More anonymity (harder to correlate), but 2 peers is sufficient for **Encryption** and **Censorship Resistance**.
 
 | Feature | Wasif-Vernam | ChaCha20 | AES-GCM | OTP |
 |---------|--------------|----------|---------|-----|
