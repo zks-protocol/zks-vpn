@@ -8,6 +8,8 @@
 //! - Relay knows Client IP, but cannot see destination (encrypted)
 //! - Exit knows destination, but cannot see Client IP (only sees Relay)
 
+#![allow(dead_code)]
+
 use tracing::{debug, info};
 
 /// Onion-encrypted packet with two layers

@@ -60,6 +60,7 @@ impl Default for SwarmControllerConfig {
 
 /// Packet for traffic mixing
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum MixedPacket {
     /// User's own VPN traffic
     OwnTraffic(Vec<u8>),
