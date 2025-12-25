@@ -10,17 +10,17 @@
 
 use crate::entropy_tax::EntropyTax;
 use crate::exit_service::{create_exit_channels, ExitPolicy, ExitService};
+use crate::p2p_relay::TunnelMessage;
 use crate::p2p_vpn::P2PVpnController;
 use crate::relay_service::{create_relay_channels, RelayService};
 use crate::traffic_mixer::{
     create_channels, TrafficMixerChannels, TrafficMixerConfig, TrafficPacket,
 };
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
-use std::collections::HashMap;
-use std::net::Ipv4Addr;
-use crate::p2p_relay::TunnelMessage;
 
 /// Configuration for swarm operation
 #[derive(Clone, Debug)]
@@ -284,8 +284,8 @@ impl SwarmController {
                         let relay = std::sync::Arc::new(relay);
 
                         // If in Server Mode, setup bidirectional forwarding with TUN
-                        if server_mode && vpn_client.is_some() {
-                            let client = vpn_client.as_ref().unwrap().clone();
+                        if let (true, Some(client)) = (server_mode, vpn_client.as_ref()) {
+                            let client = client.clone();
                             let routes = routes.clone();
                             let relay = relay.clone();
 
@@ -314,32 +314,51 @@ impl SwarmController {
                                                 if payload.len() >= 20 {
                                                     // IPv4 Source IP is at offset 12
                                                     let src_ip = Ipv4Addr::new(
-                                                        payload[12], payload[13], payload[14], payload[15],
+                                                        payload[12],
+                                                        payload[13],
+                                                        payload[14],
+                                                        payload[15],
                                                     );
-                                                    
+
                                                     // Update routing table
                                                     {
-                                                        let mut r: tokio::sync::RwLockWriteGuard<'_, HashMap<Ipv4Addr, mpsc::Sender<TunnelMessage>>> = routes.write().await;
-                                                        if !r.contains_key(&src_ip) {
-                                                            info!("🆕 Learned route: {} -> Client", src_ip);
-                                                            r.insert(src_ip, client_tx.clone());
-                                                        }
+                                                        let mut r: tokio::sync::RwLockWriteGuard<
+                                                            '_,
+                                                            HashMap<
+                                                                Ipv4Addr,
+                                                                mpsc::Sender<TunnelMessage>,
+                                                            >,
+                                                        > = routes.write().await;
+                                                        r.entry(src_ip).or_insert_with(|| {
+                                                            info!(
+                                                                "🆕 Learned route: {} -> Client",
+                                                                src_ip
+                                                            );
+                                                            client_tx.clone()
+                                                        });
                                                     }
                                                 }
 
                                                 // 2. Inject into TUN
-                                                client.lock().await.inject_packet(payload.to_vec()).await;
+                                                client
+                                                    .lock()
+                                                    .await
+                                                    .inject_packet(payload.to_vec())
+                                                    .await;
                                             }
                                             _ => {
-                                                debug!("Exit Service received non-IP message: {:?}", msg);
+                                                debug!(
+                                                    "Exit Service received non-IP message: {:?}",
+                                                    msg
+                                                );
                                             }
                                         }
                                     } else {
                                         break; // Connection closed
                                     }
                                 }
-                                
-                                // Cleanup route? 
+
+                                // Cleanup route?
                                 // Ideally yes, but we don't know which IP unless we stored it.
                                 // For now, let it stale.
                                 warn!("Client disconnected");
@@ -371,22 +390,24 @@ impl SwarmController {
         if server_mode && self.vpn_client.is_some() {
             let client = self.vpn_client.as_ref().unwrap().clone();
             let routes = self.routes.clone();
-            
+
             // Get outbound_rx (from TUN)
             let outbound_rx_opt = client.lock().await.get_outbound_rx().await;
-            
+
             if let Some(mut outbound_rx) = outbound_rx_opt {
                 tokio::spawn(async move {
                     while let Some(packet) = outbound_rx.recv().await {
                         // Parse Dest IP
                         if packet.len() >= 20 {
-                            let dst_ip = Ipv4Addr::new(
-                                packet[16], packet[17], packet[18], packet[19],
-                            );
+                            let dst_ip =
+                                Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
 
                             // Lookup route
                             let tx = {
-                                let r: tokio::sync::RwLockReadGuard<'_, HashMap<Ipv4Addr, mpsc::Sender<TunnelMessage>>> = routes.read().await;
+                                let r: tokio::sync::RwLockReadGuard<
+                                    '_,
+                                    HashMap<Ipv4Addr, mpsc::Sender<TunnelMessage>>,
+                                > = routes.read().await;
                                 r.get(&dst_ip).cloned()
                             };
 

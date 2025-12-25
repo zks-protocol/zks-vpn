@@ -588,7 +588,11 @@ async fn run_vpn_mode(_args: Args, _tunnel: TunnelClient) -> Result<(), BoxError
         // Check for admin/root privileges
         check_privileges()?;
 
-        let vpn_addr: std::net::Ipv4Addr = _args.vpn_address.clone().unwrap_or("10.0.85.1".to_string()).parse()?;
+        let vpn_addr: std::net::Ipv4Addr = _args
+            .vpn_address
+            .clone()
+            .unwrap_or("10.0.85.1".to_string())
+            .parse()?;
 
         let config = VpnConfig {
             device_name: _args.tun_name.clone(),
@@ -643,7 +647,11 @@ pub async fn start_p2p_vpn(
     // Check for admin/root privileges
     check_privileges()?;
 
-    let vpn_addr: std::net::Ipv4Addr = args.vpn_address.clone().unwrap_or("10.0.85.1".to_string()).parse()?;
+    let vpn_addr: std::net::Ipv4Addr = args
+        .vpn_address
+        .clone()
+        .unwrap_or("10.0.85.1".to_string())
+        .parse()?;
 
     let config = P2PVpnConfig {
         device_name: args.tun_name.clone(),
@@ -659,7 +667,6 @@ pub async fn start_p2p_vpn(
 
         exit_peer_address: args.exit_peer_address.parse()?,
         server_mode: args.server,
-    };
     };
 
     info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");
@@ -873,7 +880,12 @@ async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
     let vpn_address = args.vpn_address.unwrap_or_else(|| {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        format!("10.{}.{}.{}", rng.gen::<u8>(), rng.gen::<u8>(), rng.gen::<u8>())
+        format!(
+            "10.{}.{}.{}",
+            rng.gen::<u8>(),
+            rng.gen::<u8>(),
+            rng.gen::<u8>()
+        )
     });
     info!("🎲 Assigned VPN IP: {}", vpn_address);
 
@@ -886,7 +898,7 @@ async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
         relay_url: args.relay.clone(),
         vernam_url: format!("{}/entropy", args.vernam),
         exit_consent_given: args.exit_consent,
-        vpn_address: vpn_address,
+        vpn_address,
         server_mode: args.server,
     };
 
