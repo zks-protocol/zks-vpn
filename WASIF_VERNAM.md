@@ -331,6 +331,20 @@ pub struct TrueVernamFetcher {
 - **Response**: `{"entropy": "hex_encoded_32_bytes", ...}`
 - **Fallback**: If worker fails, additional local entropy is used (not zeros!)
 
+### Scalability & Cost (Cloudflare Free Tier)
+
+**Is the Free Tier enough?**
+*   **Yes, for casual use.** (100,000 requests/day).
+*   **No, for 24/7 heavy use.** (10 req/sec = ~864k req/day).
+
+**Solutions:**
+1.  **Swarm Entropy (Free):** In a swarm, we get entropy from peers via the P2P network, which costs nothing. The Worker is just a backup/supplement.
+2.  **Adaptive Polling:** The client only fetches when the buffer is low. If you aren't sending data, it sleeps.
+3.  **Self-Hosting:** You can deploy your own Worker (it's one file) to your own free Cloudflare account.
+4.  **Paid Plan:** For enterprise/VPN providers, $5/month gives 10 million requests.
+
+**Recommendation:** For maximum privacy and reliability, **Self-Host** your own entropy worker or rely on the **Swarm**.
+
 ## Comparison with Traditional Ciphers
 
 | Feature | Wasif-Vernam | ChaCha20 | AES-GCM | OTP |
