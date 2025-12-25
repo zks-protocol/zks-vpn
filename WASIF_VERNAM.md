@@ -361,7 +361,19 @@ If you only have 2 peers (e.g., You and a Friend):
 
 **Note:** More peers = More anonymity (harder to correlate), but 2 peers is sufficient for **Encryption** and **Censorship Resistance**.
 
-| Feature | Wasif-Vernam | ChaCha20 | AES-GCM | OTP |
+**Note:** More peers = More anonymity (harder to correlate), but 2 peers is sufficient for **Encryption** and **Censorship Resistance**.
+
+### What if the Cloudflare Worker is down?
+
+**The system continues to work perfectly.**
+
+1.  **Automatic Fallback:** The client detects the failure.
+2.  **Compensation:** Instead of fetching from Cloudflare, it generates **Extra Local Entropy** (from your device's CSPRNG).
+3.  **Security:**
+    *   **With Peers:** Still **Trustless** (Local + Swarm).
+    *   **Solo:** Trusts your local device (Standard VPN security).
+
+**You are never blocked by a worker failure.**
 |---------|--------------|----------|---------|-----|
 | Information-Theoretic | ✅ | ❌ | ❌ | ✅ |
 | Post-Quantum | ✅ | ⚠️ | ⚠️ | ✅ |
