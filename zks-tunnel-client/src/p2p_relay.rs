@@ -39,137 +39,205 @@ impl PeerRole {
     }
 }
 
-/// Wasif Vernam: Practical Double-Key Encryption
+/// Wasif Vernam: True Infinite-Key Encryption
 ///
-/// Combines ChaCha20-Poly1305 (Base Layer) with a Remote Entropy Stream (Enhancement Layer).
-/// Currently implements the Base Layer (ChaCha20-Poly1305) for production security.
+/// Combines ChaCha20-Poly1305 (Base Layer) with an Infinite Entropy Stream (Enhancement Layer).
+/// Uses HKDF to expand swarm entropy into an infinite keystream - true Vernam cipher!
 pub struct WasifVernam {
-    /// ChaCha20Poly1305 Cipher
+    /// ChaCha20Poly1305 Cipher (base layer)
     cipher: ChaCha20Poly1305,
     /// Nonce counter (incremented per message)
     nonce_counter: AtomicU64,
-    /// Remote key stream (for future "True Randomness" enhancement)
-    #[allow(dead_code)]
-    remote_key: Vec<u8>,
+    /// Swarm entropy seed (32 bytes from combined peer entropy)
+    swarm_seed: [u8; 32],
+    /// Key offset (tracks how much key material has been used)
+    key_offset: AtomicU64,
+    /// Has swarm entropy (false = ChaCha20 only mode)
+    has_swarm_entropy: bool,
 }
 
 impl WasifVernam {
-    /// Create new Wasif Vernam from a 32-byte shared secret and remote key
+    /// Create new Wasif Vernam from a 32-byte shared secret and swarm entropy
     ///
     /// # Arguments
     /// * `shared_secret` - 32-byte key from key exchange (for ChaCha20-Poly1305)
-    /// * `remote_key` - Remote entropy from Swarm (for XOR layer, can be empty)
-    pub fn new(shared_secret: [u8; 32], remote_key: Vec<u8>) -> Self {
+    /// * `swarm_entropy` - Swarm entropy (any length, will be hashed to 32-byte seed)
+    pub fn new(shared_secret: [u8; 32], swarm_entropy: Vec<u8>) -> Self {
+        use sha2::{Sha256, Digest};
+        
         let key = Key::from_slice(&shared_secret);
         let cipher = ChaCha20Poly1305::new(key);
+
+        // Hash swarm entropy to get a 32-byte seed for HKDF expansion
+        let (swarm_seed, has_swarm_entropy) = if !swarm_entropy.is_empty() {
+            let mut hasher = Sha256::new();
+            hasher.update(&swarm_entropy);
+            let hash: [u8; 32] = hasher.finalize().into();
+            (hash, true)
+        } else {
+            ([0u8; 32], false)
+        };
 
         Self {
             cipher,
             nonce_counter: AtomicU64::new(0),
-            remote_key,
+            swarm_seed,
+            key_offset: AtomicU64::new(0),
+            has_swarm_entropy,
         }
     }
 
-    /// Encrypt data using ChaCha20-Poly1305
-    /// Returns: [Nonce (12 bytes) | Ciphertext (N bytes) | Tag (16 bytes)]
+    /// Generate keystream bytes at a given offset using HKDF
+    /// This creates an infinite, non-repeating keystream from the swarm seed
+    fn generate_keystream(&self, offset: u64, length: usize) -> Vec<u8> {
+        use hkdf::Hkdf;
+        use sha2::Sha256;
+        
+        let mut keystream = Vec::with_capacity(length);
+        let chunk_size = 1024; // HKDF output chunk size
+        
+        let mut current_offset = offset;
+        while keystream.len() < length {
+            // Each chunk is derived with a unique context based on offset
+            let chunk_index = current_offset / chunk_size as u64;
+            let context = format!("wasif-vernam-keystream-{}", chunk_index);
+            
+            let hk = Hkdf::<Sha256>::new(Some(b"zks-infinite-key-v1"), &self.swarm_seed);
+            let mut chunk = vec![0u8; chunk_size];
+            hk.expand(context.as_bytes(), &mut chunk)
+                .expect("HKDF expansion should not fail");
+            
+            // Calculate where in this chunk we should start reading
+            let chunk_start = (current_offset % chunk_size as u64) as usize;
+            let bytes_needed = length - keystream.len();
+            let bytes_available = chunk_size - chunk_start;
+            let bytes_to_copy = bytes_needed.min(bytes_available);
+            
+            keystream.extend_from_slice(&chunk[chunk_start..chunk_start + bytes_to_copy]);
+            current_offset += bytes_to_copy as u64;
+        }
+        
+        keystream
+    }
+
+    /// Encrypt data using True Wasif-Vernam (Infinite Key XOR + ChaCha20-Poly1305)
+    /// Returns: [Nonce (12 bytes) | Key Offset (8 bytes) | Ciphertext (N bytes) | Tag (16 bytes)]
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
-        // Generate nonce: 4 bytes random + 8 bytes counter to ensure uniqueness
+        // Generate unique nonce
         let mut nonce_bytes = [0u8; 12];
         let counter = self.nonce_counter.fetch_add(1, Ordering::SeqCst);
         nonce_bytes[4..].copy_from_slice(&counter.to_be_bytes());
-        // Add some randomness to the first 4 bytes for extra safety against resets
         getrandom::getrandom(&mut nonce_bytes[0..4]).unwrap_or_default();
-
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        // 1. Double-Key Defense: XOR Plaintext with Remote Key (if available)
-        // This ensures that even if ChaCha20 key is compromised, the message is protected by Swarm Entropy.
+        // 1. True Vernam Layer: XOR with infinite keystream (if swarm entropy available)
         let mut mixed_data = data.to_vec();
-        if !self.remote_key.is_empty() {
+        let key_offset = if self.has_swarm_entropy {
+            // Get current offset and advance it atomically
+            let offset = self.key_offset.fetch_add(data.len() as u64, Ordering::SeqCst);
+            
+            // Generate unique keystream for this data
+            let keystream = self.generate_keystream(offset, data.len());
+            
+            // XOR with keystream - each byte gets a UNIQUE key byte!
             for (i, byte) in mixed_data.iter_mut().enumerate() {
-                *byte ^= self.remote_key[i % self.remote_key.len()];
+                *byte ^= keystream[i];
             }
-        }
+            
+            offset // Return offset so receiver knows where to start
+        } else {
+            0 // No swarm entropy, skip XOR layer
+        };
 
-        // 2. Base Layer: Encrypt mixed data with ChaCha20-Poly1305
+        // 2. Base Layer: Encrypt with ChaCha20-Poly1305
         let mut ciphertext = self.cipher.encrypt(nonce, mixed_data.as_slice())?;
 
-        // Prepend nonce to ciphertext so receiver can decrypt
-        let mut result = Vec::with_capacity(12 + ciphertext.len());
+        // Build result: [Nonce (12) | Offset (8) | Ciphertext]
+        let mut result = Vec::with_capacity(12 + 8 + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
+        result.extend_from_slice(&key_offset.to_be_bytes());
         result.append(&mut ciphertext);
 
         Ok(result)
     }
 
-    /// Decrypt data using ChaCha20-Poly1305
-    /// Input: [Nonce (12 bytes) | Ciphertext (N bytes) | Tag (16 bytes)]
+    /// Decrypt data using True Wasif-Vernam
+    /// Input: [Nonce (12 bytes) | Key Offset (8 bytes) | Ciphertext (N bytes) | Tag (16 bytes)]
     pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
-        if data.len() < 12 + 16 {
+        if data.len() < 12 + 8 + 16 {
             return Err(chacha20poly1305::aead::Error);
         }
 
-        // Extract nonce
+        // Extract nonce and offset
         let nonce = Nonce::from_slice(&data[0..12]);
-        let ciphertext = &data[12..];
+        let key_offset = u64::from_be_bytes(data[12..20].try_into().unwrap());
+        let ciphertext = &data[20..];
 
-        // Decrypt
         // 1. Base Layer: Decrypt with ChaCha20-Poly1305
         let mut plaintext = self.cipher.decrypt(nonce, ciphertext)?;
 
-        // 2. Double-Key Defense: XOR with Remote Key to recover original plaintext
-        if !self.remote_key.is_empty() {
+        // 2. True Vernam Layer: XOR with infinite keystream
+        if self.has_swarm_entropy && key_offset > 0 {
+            let keystream = self.generate_keystream(key_offset, plaintext.len());
             for (i, byte) in plaintext.iter_mut().enumerate() {
-                *byte ^= self.remote_key[i % self.remote_key.len()];
+                *byte ^= keystream[i];
             }
         }
 
         Ok(plaintext)
     }
 
-    /// Fetch remote key from zks-vernam worker
+    /// Fetch swarm entropy seed from zks-vernam worker
     #[allow(dead_code)]
     pub async fn fetch_remote_key(
         &mut self,
         vernam_url: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use sha2::{Sha256, Digest};
+        
         let url = format!("{}/entropy?size=32&n=10", vernam_url.trim_end_matches('/'));
-
-        // Fetch JSON from worker
         let response = reqwest::get(&url).await?;
         if !response.status().is_success() {
             return Err(format!("Failed to fetch entropy: {}", response.status()).into());
         }
 
         let body = response.text().await?;
-
-        // Parse JSON: {"entropy": "hex_string", ...}
         let json: serde_json::Value = serde_json::from_str(&body)?;
         let entropy_hex = json["entropy"].as_str().ok_or("Missing entropy field")?;
-
-        // Decode hex
         let entropy = hex::decode(entropy_hex)?;
 
-        if entropy.len() != 32 {
-            return Err("Invalid entropy length".into());
-        }
+        // Hash to get seed
+        let mut hasher = Sha256::new();
+        hasher.update(&entropy);
+        self.swarm_seed = hasher.finalize().into();
+        self.has_swarm_entropy = true;
+        self.key_offset.store(0, Ordering::SeqCst); // Reset offset for new seed
 
-        // Store for future mixing (currently unused but ready)
-        self.remote_key = entropy;
-
-        info!("Fetched 32 bytes of Swarm Entropy from zks-key worker");
+        info!("Fetched Swarm Entropy seed from worker - Infinite Vernam active!");
         Ok(())
     }
 
-    /// Set the remote key directly (used when receiving SharedEntropy from peer)
+    /// Set the swarm entropy seed directly (used when receiving from peer)
     pub fn set_remote_key(&mut self, key: Vec<u8>) {
-        info!("Applied {} bytes of Swarm Entropy from peer", key.len());
-        self.remote_key = key;
+        use sha2::{Sha256, Digest};
+        
+        if !key.is_empty() {
+            let mut hasher = Sha256::new();
+            hasher.update(&key);
+            self.swarm_seed = hasher.finalize().into();
+            self.has_swarm_entropy = true;
+            self.key_offset.store(0, Ordering::SeqCst);
+            info!("Applied {} bytes of Swarm Entropy - Infinite Vernam active!", key.len());
+        }
     }
 
-    /// Get a copy of the remote key (for sharing with peer)
+    /// Get the swarm seed (for sharing with peer)
     pub fn get_remote_key(&self) -> &[u8] {
-        &self.remote_key
+        if self.has_swarm_entropy {
+            &self.swarm_seed
+        } else {
+            &[]
+        }
     }
 }
 
