@@ -56,7 +56,7 @@ native-tls = "0.2"
 tokio-native-tls = "0.3"
 
 # libp2p for P2P swarm with DCUtR hole-punching (optional, for swarm feature)
-libp2p = { version = "0.54", features = ["dcutr", "relay", "identify", "noise", "tcp", "quic", "yamux", "dns", "tokio", "macros", "ping"], optional = true }
+libp2p = { version = "0.54", features = ["dcutr", "relay", "identify", "noise", "tcp", "quic", "yamux", "dns", "tokio", "macros", "ping", "kad"], optional = true }
 
 # Post-quantum cryptography (optional, for swarm feature)
 ml-kem = { version = "0.2", optional = true }

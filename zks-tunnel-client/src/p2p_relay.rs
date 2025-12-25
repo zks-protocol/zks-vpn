@@ -66,8 +66,8 @@ impl WasifVernam {
     /// * `shared_secret` - 32-byte key from key exchange (for ChaCha20-Poly1305)
     /// * `swarm_entropy` - Swarm entropy (any length, will be hashed to 32-byte seed)
     pub fn new(shared_secret: [u8; 32], swarm_entropy: Vec<u8>) -> Self {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         let key = Key::from_slice(&shared_secret);
         let cipher = ChaCha20Poly1305::new(key);
 
@@ -103,31 +103,31 @@ impl WasifVernam {
     fn generate_keystream(&self, offset: u64, length: usize) -> Vec<u8> {
         use hkdf::Hkdf;
         use sha2::Sha256;
-        
+
         let mut keystream = Vec::with_capacity(length);
         let chunk_size = 1024; // HKDF output chunk size
-        
+
         let mut current_offset = offset;
         while keystream.len() < length {
             // Each chunk is derived with a unique context based on offset
             let chunk_index = current_offset / chunk_size as u64;
             let context = format!("wasif-vernam-keystream-{}", chunk_index);
-            
+
             let hk = Hkdf::<Sha256>::new(Some(b"zks-infinite-key-v1"), &self.swarm_seed);
             let mut chunk = vec![0u8; chunk_size];
             hk.expand(context.as_bytes(), &mut chunk)
                 .expect("HKDF expansion should not fail");
-            
+
             // Calculate where in this chunk we should start reading
             let chunk_start = (current_offset % chunk_size as u64) as usize;
             let bytes_needed = length - keystream.len();
             let bytes_available = chunk_size - chunk_start;
             let bytes_to_copy = bytes_needed.min(bytes_available);
-            
+
             keystream.extend_from_slice(&chunk[chunk_start..chunk_start + bytes_to_copy]);
             current_offset += bytes_to_copy as u64;
         }
-        
+
         keystream
     }
 
@@ -145,16 +145,18 @@ impl WasifVernam {
         let mut mixed_data = data.to_vec();
         let key_offset = if self.has_swarm_entropy {
             // Get current offset and advance it atomically
-            let offset = self.key_offset.fetch_add(data.len() as u64, Ordering::SeqCst);
-            
+            let offset = self
+                .key_offset
+                .fetch_add(data.len() as u64, Ordering::SeqCst);
+
             // Generate unique keystream for this data
             let keystream = self.generate_keystream(offset, data.len());
-            
+
             // XOR with keystream - each byte gets a UNIQUE key byte!
             for (i, byte) in mixed_data.iter_mut().enumerate() {
                 *byte ^= keystream[i];
             }
-            
+
             offset // Return offset so receiver knows where to start
         } else {
             0 // No swarm entropy, skip XOR layer
@@ -200,15 +202,19 @@ impl WasifVernam {
 
     /// Encrypt data using TRUE Vernam mode (information-theoretic security)
     /// Uses TRUE random bytes from buffer instead of HKDF expansion
-    /// 
+    ///
     /// SECURITY MODEL: The TRUE random XOR key is included in the envelope,
     /// encrypted by ChaCha20-Poly1305. This provides:
     /// 1. Defense-in-depth: Even if ChaCha20 is broken, data is XOR'd with random
     /// 2. Information-theoretic security for the XOR layer itself
     /// 3. Forward secrecy: Random bytes are consumed and never reused
-    /// 
+    ///
     /// Returns: [Nonce (12 bytes) | Mode (1 byte: 0x01) | KeyLen (4 bytes) | XOR Key (N bytes) | Ciphertext (M bytes) | Tag (16 bytes)]
-    pub async fn encrypt_true_vernam(&self, data: &[u8]) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
+    #[allow(dead_code)]
+    pub async fn encrypt_true_vernam(
+        &self,
+        data: &[u8],
+    ) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
         // Generate unique nonce
         let mut nonce_bytes = [0u8; 12];
         let counter = self.nonce_counter.fetch_add(1, Ordering::SeqCst);
@@ -220,13 +226,13 @@ impl WasifVernam {
         let mut mixed_data = data.to_vec();
         let mut xor_key = Vec::new();
         let mut mode_byte = 0x00u8; // 0x00 = HKDF mode, 0x01 = True Vernam mode
-        
+
         if let Some(ref buffer) = self.true_vernam_buffer {
             let keystream = {
                 let mut buf = buffer.lock().await;
                 buf.consume(data.len())
             };
-            
+
             if let Some(keystream) = keystream {
                 // XOR with TRUE random bytes - mathematically unbreakable!
                 for (i, byte) in mixed_data.iter_mut().enumerate() {
@@ -239,7 +245,9 @@ impl WasifVernam {
                 // Buffer empty - fallback to HKDF mode
                 warn!("⚠️ True Vernam buffer empty! Falling back to HKDF mode");
                 if self.has_swarm_entropy {
-                    let offset = self.key_offset.fetch_add(data.len() as u64, Ordering::SeqCst);
+                    let offset = self
+                        .key_offset
+                        .fetch_add(data.len() as u64, Ordering::SeqCst);
                     let keystream = self.generate_keystream(offset, data.len());
                     for (i, byte) in mixed_data.iter_mut().enumerate() {
                         *byte ^= keystream[i];
@@ -249,7 +257,9 @@ impl WasifVernam {
             }
         } else if self.has_swarm_entropy {
             // No True Vernam buffer, use HKDF mode
-            let offset = self.key_offset.fetch_add(data.len() as u64, Ordering::SeqCst);
+            let offset = self
+                .key_offset
+                .fetch_add(data.len() as u64, Ordering::SeqCst);
             let keystream = self.generate_keystream(offset, data.len());
             for (i, byte) in mixed_data.iter_mut().enumerate() {
                 *byte ^= keystream[i];
@@ -280,7 +290,11 @@ impl WasifVernam {
 
     /// Decrypt data encrypted with TRUE Vernam mode
     /// Extracts the XOR key from the envelope and decrypts properly
-    pub async fn decrypt_true_vernam(&self, data: &[u8]) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
+    #[allow(dead_code)]
+    pub async fn decrypt_true_vernam(
+        &self,
+        data: &[u8],
+    ) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
         if data.len() < 12 + 1 + 16 {
             return Err(chacha20poly1305::aead::Error);
         }
@@ -305,7 +319,7 @@ impl WasifVernam {
                 }
                 let xor_key = &payload[4..4 + key_len];
                 let mixed_data = &payload[4 + key_len..];
-                
+
                 // XOR to recover original plaintext
                 let mut result = mixed_data.to_vec();
                 for (i, byte) in result.iter_mut().enumerate() {
@@ -336,8 +350,8 @@ impl WasifVernam {
         &mut self,
         vernam_url: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         let url = format!("{}/entropy?size=32&n=10", vernam_url.trim_end_matches('/'));
         let response = reqwest::get(&url).await?;
         if !response.status().is_success() {
@@ -362,15 +376,18 @@ impl WasifVernam {
 
     /// Set the swarm entropy seed directly (used when receiving from peer)
     pub fn set_remote_key(&mut self, key: Vec<u8>) {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         if !key.is_empty() {
             let mut hasher = Sha256::new();
             hasher.update(&key);
             self.swarm_seed = hasher.finalize().into();
             self.has_swarm_entropy = true;
             self.key_offset.store(0, Ordering::SeqCst);
-            info!("Applied {} bytes of Swarm Entropy - Infinite Vernam active!", key.len());
+            info!(
+                "Applied {} bytes of Swarm Entropy - Infinite Vernam active!",
+                key.len()
+            );
         }
     }
 
@@ -394,10 +411,10 @@ impl WasifVernam {
     }
 
     /// Refresh the swarm seed by mixing in new entropy (FORWARD SECRECY)
-    /// 
+    ///
     /// This is the key to TRUE continuous entropy:
     /// new_seed = HKDF(old_seed || fresh_entropy || generation)
-    /// 
+    ///
     /// Benefits:
     /// - Even if current seed is compromised, past traffic is safe
     /// - Each refresh creates a cryptographically independent key chain
@@ -405,7 +422,7 @@ impl WasifVernam {
     pub fn refresh_entropy(&mut self, fresh_entropy: &[u8]) {
         use hkdf::Hkdf;
         use sha2::Sha256;
-        
+
         if fresh_entropy.is_empty() {
             return;
         }
@@ -414,7 +431,7 @@ impl WasifVernam {
         let mut input = Vec::with_capacity(32 + fresh_entropy.len() + 8);
         input.extend_from_slice(&self.swarm_seed);
         input.extend_from_slice(fresh_entropy);
-        
+
         // Add current offset as "generation" to prevent replay
         let generation = self.key_offset.load(Ordering::SeqCst);
         input.extend_from_slice(&generation.to_be_bytes());
@@ -428,19 +445,24 @@ impl WasifVernam {
         // Update seed (old seed is now unreachable - forward secrecy!)
         self.swarm_seed = new_seed;
         self.has_swarm_entropy = true;
-        
+
         // NOTE: We do NOT reset key_offset - the new keystream continues from current position
         // This ensures no key byte is ever reused across refresh cycles
-        
-        info!("🔄 Refreshed swarm entropy - Forward secrecy checkpoint! (generation: {})", generation);
+
+        info!(
+            "🔄 Refreshed swarm entropy - Forward secrecy checkpoint! (generation: {})",
+            generation
+        );
     }
 
     /// Get current key offset (for monitoring/debugging)
+    #[allow(dead_code)]
     pub fn get_key_offset(&self) -> u64 {
         self.key_offset.load(Ordering::SeqCst)
     }
 
     /// Check if entropy refresh is recommended (e.g., after 1MB of traffic)
+    #[allow(dead_code)]
     pub fn needs_refresh(&self) -> bool {
         const REFRESH_THRESHOLD: u64 = 1024 * 1024; // 1MB
         self.key_offset.load(Ordering::SeqCst) % REFRESH_THRESHOLD < 1024
@@ -448,7 +470,7 @@ impl WasifVernam {
 }
 
 /// Continuous Entropy Refresher: Periodically fetches fresh entropy and refreshes the cipher
-/// 
+///
 /// This is what makes ZKS a TRUE continuous entropy system:
 /// - Every 30 seconds (or after 1MB traffic), fetch fresh entropy from swarm/worker
 /// - Mix into existing seed using refresh_entropy()
@@ -467,16 +489,16 @@ impl ContinuousEntropyRefresher {
     pub fn start_background_task(self) {
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(30)); // Refresh every 30 seconds
-            
+
             loop {
                 interval.tick().await;
-                
-                // Check if refresh is needed (either by time or by traffic volume)
+
+                // Check if refresh is needed (always refresh on interval)
                 let needs_refresh = {
-                    let cipher = self.cipher.lock().await;
-                    cipher.needs_refresh() || true // Always refresh on interval
+                    let _cipher = self.cipher.lock().await;
+                    true // Always refresh on interval for continuous forward secrecy
                 };
-                
+
                 if needs_refresh {
                     if let Err(e) = self.fetch_and_refresh().await {
                         warn!("Failed to refresh entropy: {}", e);
@@ -488,9 +510,12 @@ impl ContinuousEntropyRefresher {
 
     /// Fetch fresh entropy from worker and refresh the cipher
     async fn fetch_and_refresh(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/entropy?size=32&n=10", self.vernam_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/entropy?size=32&n=10",
+            self.vernam_url.trim_end_matches('/')
+        );
         let response = reqwest::get(&url).await?;
-        
+
         if !response.status().is_success() {
             return Err(format!("Failed to fetch entropy: {}", response.status()).into());
         }
@@ -512,6 +537,7 @@ impl ContinuousEntropyRefresher {
 }
 
 // Keep the old name as an alias for backward compatibility
+#[allow(dead_code)]
 pub type EntropyTaxPayer = ContinuousEntropyRefresher;
 
 /// Trait combining all required stream traits
@@ -975,8 +1001,9 @@ impl P2PRelay {
                     match keys.lock().await.fetch_remote_key(vernam_url).await {
                         Ok(()) => {
                             // Send the entropy to Exit Peer
-                            let entropy_msg =
-                                KeyExchangeMessage::new_shared_entropy(keys.lock().await.get_remote_key());
+                            let entropy_msg = KeyExchangeMessage::new_shared_entropy(
+                                keys.lock().await.get_remote_key(),
+                            );
                             writer
                                 .lock()
                                 .await
@@ -1059,14 +1086,15 @@ impl P2PRelay {
 
             // === TRUE VERNAM MODE (Information-Theoretic Security) ===
             // Enable by default for maximum security
-            let true_vernam_buffer = Arc::new(Mutex::new(crate::true_vernam::TrueVernamBuffer::new()));
-            
+            let true_vernam_buffer =
+                Arc::new(Mutex::new(crate::true_vernam::TrueVernamBuffer::new()));
+
             // Create fetcher and set swarm seed if available (for TRUSTLESS mode)
             let mut fetcher = crate::true_vernam::TrueVernamFetcher::new(
                 vernam_url.to_string(),
                 true_vernam_buffer.clone(),
             );
-            
+
             // Pass swarm seed to fetcher (makes it TRUSTLESS)
             // The swarm seed comes from peer entropy collection at the start
             {
@@ -1079,15 +1107,17 @@ impl P2PRelay {
                     info!("⚠️ True Vernam: Using worker only (no peers, trust Cloudflare)");
                 }
             }
-            
+
             fetcher.start_background_task();
-            
+
             // Enable True Vernam on the cipher
             {
                 let mut cipher = keys.lock().await;
                 cipher.enable_true_vernam(true_vernam_buffer);
             }
-            info!("🔐 TRUE VERNAM MODE ENABLED BY DEFAULT - Mathematically unbreakable encryption!");
+            info!(
+                "🔐 TRUE VERNAM MODE ENABLED BY DEFAULT - Mathematically unbreakable encryption!"
+            );
         }
 
         // Send ack

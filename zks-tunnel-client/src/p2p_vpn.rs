@@ -34,6 +34,7 @@ mod implementation {
     use tracing::{debug, error, info, warn};
 
     use crate::dns_guard::DnsGuard;
+    use crate::entropy_tax::EntropyTax;
     use crate::kill_switch::KillSwitch;
     use crate::p2p_relay::{P2PRelay, PeerRole};
     use netstack_smoltcp::StackBuilder;
@@ -191,11 +192,12 @@ mod implementation {
         dns_response_tx: Arc<RwLock<Option<mpsc::Sender<(Vec<u8>, SocketAddr)>>>>,
         kill_switch: Arc<Mutex<KillSwitch>>,
         dns_guard: Arc<Mutex<Option<DnsGuard>>>,
+        entropy_tax: Arc<Mutex<EntropyTax>>,
     }
 
     impl P2PVpnController {
         /// Create a new P2P VPN controller
-        pub fn new(config: P2PVpnConfig) -> Self {
+        pub fn new(config: P2PVpnConfig, entropy_tax: Arc<Mutex<EntropyTax>>) -> Self {
             Self {
                 config,
                 state: Arc::new(Mutex::new(P2PVpnState::Disconnected)),
@@ -212,6 +214,7 @@ mod implementation {
                 dns_response_tx: Arc::new(RwLock::new(None)),
                 kill_switch: Arc::new(Mutex::new(KillSwitch::new())),
                 dns_guard: Arc::new(Mutex::new(None)),
+                entropy_tax,
             }
         }
 
@@ -1015,6 +1018,7 @@ mod implementation {
                 let running = running.clone();
                 let stats = stats.clone();
                 let pool = crate::packet_pool::PacketBufPool::new(1024, 2048);
+                let entropy_tax = self.entropy_tax.clone();
 
                 tokio::spawn(async move {
                     info!("Starting TUN queue {} reader", i);
@@ -1037,6 +1041,15 @@ mod implementation {
                                     payload: Bytes::copy_from_slice(&buf[..n]),
                                 };
                                 pool.return_buf(buf);
+
+                                // Spend tokens
+                                {
+                                    let mut tax = entropy_tax.lock().await;
+                                    if let Err(e) = tax.spend_tokens(n as u64) {
+                                        warn!("Insufficient tokens to send packet: {}", e);
+                                        continue;
+                                    }
+                                }
 
                                 if let Err(e) = relay_send.send(&msg).await {
                                     error!("Queue {} send error: {}", i, e);
@@ -1093,6 +1106,7 @@ mod implementation {
             let running = self.running.clone();
             let running_clone = running.clone();
             let stats = self.stats.clone();
+            let entropy_tax = self.entropy_tax.clone();
 
             // Wrap TUN device in Arc for sharing
             let device = Arc::new(device);
@@ -1152,6 +1166,15 @@ mod implementation {
 
                             // Return buffer to pool immediately
                             pool.return_buf(buf);
+
+                            // Spend tokens
+                            {
+                                let mut tax = entropy_tax.lock().await;
+                                if let Err(e) = tax.spend_tokens(n as u64) {
+                                    warn!("Insufficient tokens to send packet: {}", e);
+                                    continue;
+                                }
+                            }
 
                             if let Err(e) = relay_for_send.send(&msg).await {
                                 error!("Failed to send to relay: {}", e);

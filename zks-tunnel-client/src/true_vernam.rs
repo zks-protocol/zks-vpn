@@ -20,6 +20,7 @@ const MIN_BUFFER_SIZE: usize = 1024 * 64; // 64KB
 const TARGET_BUFFER_SIZE: usize = 1024 * 1024; // 1MB
 
 /// How many bytes to fetch per request
+#[allow(dead_code)]
 const FETCH_CHUNK_SIZE: usize = 1024 * 32; // 32KB per request
 
 /// True Vernam Buffer: Stores TRUE random bytes for one-time use
@@ -46,16 +47,22 @@ impl TrueVernamBuffer {
     pub fn push_entropy(&mut self, bytes: &[u8]) {
         self.buffer.extend(bytes.iter());
         self.bytes_fetched += bytes.len() as u64;
-        debug!("📥 Added {} bytes to True Vernam buffer (total: {})", 
-               bytes.len(), self.buffer.len());
+        debug!(
+            "📥 Added {} bytes to True Vernam buffer (total: {})",
+            bytes.len(),
+            self.buffer.len()
+        );
     }
 
     /// Consume TRUE random bytes (NEVER reused - this is the key!)
     /// Returns None if not enough bytes available
     pub fn consume(&mut self, count: usize) -> Option<Vec<u8>> {
         if self.buffer.len() < count {
-            warn!("⚠️ True Vernam buffer underrun! Need {} bytes, have {}", 
-                  count, self.buffer.len());
+            warn!(
+                "⚠️ True Vernam buffer underrun! Need {} bytes, have {}",
+                count,
+                self.buffer.len()
+            );
             return None;
         }
 
@@ -66,11 +73,14 @@ impl TrueVernamBuffer {
                 result.push(byte);
             }
         }
-        
+
         self.bytes_consumed += count as u64;
-        debug!("🔑 Consumed {} TRUE random bytes (remaining: {})", 
-               count, self.buffer.len());
-        
+        debug!(
+            "🔑 Consumed {} TRUE random bytes (remaining: {})",
+            count,
+            self.buffer.len()
+        );
+
         Some(result)
     }
 
@@ -102,11 +112,11 @@ impl Default for TrueVernamBuffer {
 }
 
 /// Hybrid Entropy Fetcher: Combines peer + worker entropy for TRUE trustless security
-/// 
+///
 /// Trust Model:
 /// - With peers: Combined entropy is trustless (even if worker is compromised)
 /// - Without peers: Falls back to worker only (trust Cloudflare)
-/// 
+///
 /// Formula: combined_entropy = SHA256(local_random || worker_entropy || peer1 || peer2 || ...)
 pub struct TrueVernamFetcher {
     vernam_url: String,
@@ -117,8 +127,8 @@ pub struct TrueVernamFetcher {
 
 impl TrueVernamFetcher {
     pub fn new(vernam_url: String, buffer: Arc<Mutex<TrueVernamBuffer>>) -> Self {
-        Self { 
-            vernam_url, 
+        Self {
+            vernam_url,
             buffer,
             swarm_seed: None,
         }
@@ -145,15 +155,15 @@ impl TrueVernamFetcher {
 
             // Continuous refill loop
             let mut interval = interval(Duration::from_millis(100)); // Check every 100ms
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let needs_refill = {
                     let buffer = self.buffer.lock().await;
                     buffer.needs_refill()
                 };
-                
+
                 if needs_refill {
                     if let Err(e) = self.fetch_hybrid_entropy().await {
                         warn!("Entropy fetch failed: {}", e);
@@ -164,34 +174,37 @@ impl TrueVernamFetcher {
     }
 
     /// Fetch hybrid entropy: combines local CSPRNG + worker + swarm seed
-    /// 
+    ///
     /// Security: Even if worker is compromised, local + swarm entropy protects you.
     /// Even if your device is compromised, worker + swarm entropy protects you.
     async fn fetch_hybrid_entropy(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         // 1. Local CSPRNG entropy (always available, you trust your device)
         let mut local_entropy = [0u8; 32];
         getrandom::getrandom(&mut local_entropy).unwrap_or_default();
-        
+
         // 2. Worker entropy (Cloudflare's hardware RNG + LavaRand)
         let worker_entropy = self.fetch_worker_entropy().await.unwrap_or_else(|e| {
-            warn!("Worker entropy fetch failed: {}, using additional local randomness", e);
+            warn!(
+                "Worker entropy fetch failed: {}, using additional local randomness",
+                e
+            );
             // Fallback: generate MORE local entropy (not zeros!)
             let mut fallback = [0u8; 32];
             getrandom::getrandom(&mut fallback).unwrap_or_default();
             fallback.to_vec()
         });
-        
+
         // 3. Combine all entropy sources using SHA256
         let mut hasher = Sha256::new();
-        
+
         // Add local entropy (you trust your device)
-        hasher.update(&local_entropy);
-        
+        hasher.update(local_entropy);
+
         // Add worker entropy (trust Cloudflare OR swarm overrides)
-        hasher.update(&worker_entropy);
-        
+        hasher.update(worker_entropy);
+
         // Add swarm seed if available (TRUSTLESS - even if worker is evil)
         if let Some(swarm_seed) = &self.swarm_seed {
             hasher.update(swarm_seed);
@@ -199,17 +212,17 @@ impl TrueVernamFetcher {
         } else {
             debug!("⚠️ Hybrid entropy: local + worker only (trust Cloudflare)");
         }
-        
+
         // Add timestamp for forward secrecy
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        hasher.update(&timestamp.to_be_bytes());
-        
+        hasher.update(timestamp.to_be_bytes());
+
         // Derive 32 bytes of TRUE hybrid entropy
         let combined: [u8; 32] = hasher.finalize().into();
-        
+
         // Add to buffer
         {
             let mut buffer = self.buffer.lock().await;
@@ -220,10 +233,15 @@ impl TrueVernamFetcher {
     }
 
     /// Fetch entropy from worker (Cloudflare's hardware RNG)
-    async fn fetch_worker_entropy(&self) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/entropy?size=32&n=1", self.vernam_url.trim_end_matches('/'));
+    async fn fetch_worker_entropy(
+        &self,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let url = format!(
+            "{}/entropy?size=32&n=1",
+            self.vernam_url.trim_end_matches('/')
+        );
         let response = reqwest::get(&url).await?;
-        
+
         if !response.status().is_success() {
             return Err(format!("Failed to fetch entropy: {}", response.status()).into());
         }
@@ -244,21 +262,21 @@ mod tests {
     #[test]
     fn test_buffer_consume_removes_bytes() {
         let mut buffer = TrueVernamBuffer::new();
-        
+
         // Add some entropy
         buffer.push_entropy(&[1, 2, 3, 4, 5]);
         assert_eq!(buffer.available(), 5);
-        
+
         // Consume some
         let consumed = buffer.consume(3).unwrap();
         assert_eq!(consumed, vec![1, 2, 3]);
         assert_eq!(buffer.available(), 2);
-        
+
         // Consume more - should get remaining
         let consumed = buffer.consume(2).unwrap();
         assert_eq!(consumed, vec![4, 5]);
         assert_eq!(buffer.available(), 0);
-        
+
         // Buffer is empty - should return None
         assert!(buffer.consume(1).is_none());
     }
@@ -266,17 +284,17 @@ mod tests {
     #[test]
     fn test_bytes_never_reused() {
         let mut buffer = TrueVernamBuffer::new();
-        
+
         // Add entropy
         buffer.push_entropy(&[0xAB; 100]);
-        
+
         // Consume in chunks
         let chunk1 = buffer.consume(50).unwrap();
         let chunk2 = buffer.consume(50).unwrap();
-        
+
         // Each consumption reduces the buffer
         assert_eq!(buffer.available(), 0);
-        
+
         // The bytes are gone forever - TRUE one-time!
         assert!(buffer.consume(1).is_none());
     }

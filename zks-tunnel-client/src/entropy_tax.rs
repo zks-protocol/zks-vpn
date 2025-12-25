@@ -61,6 +61,8 @@ pub struct EntropyTax {
     state: EntropyState,
     /// Timestamp when entropy was generated
     created_at: Instant,
+    /// Token balance (Entropy Tax)
+    token_balance: u64,
 }
 
 impl EntropyTax {
@@ -83,7 +85,31 @@ impl EntropyTax {
             remote_key: None,
             state: EntropyState::Init,
             created_at: Instant::now(),
+            token_balance: 1000, // Initial bootstrap balance
         }
+    }
+
+    /// Earn tokens (e.g., for relaying traffic)
+    pub fn earn_tokens(&mut self, amount: u64) {
+        self.token_balance = self.token_balance.saturating_add(amount);
+    }
+
+    /// Spend tokens (e.g., for sending traffic)
+    pub fn spend_tokens(&mut self, amount: u64) -> Result<(), String> {
+        if self.token_balance >= amount {
+            self.token_balance -= amount;
+            Ok(())
+        } else {
+            Err(format!(
+                "Insufficient tokens: {} < {}",
+                self.token_balance, amount
+            ))
+        }
+    }
+
+    /// Get current token balance
+    pub fn balance(&self) -> u64 {
+        self.token_balance
     }
 
     /// Get our commitment hash (to send to peers)
@@ -419,5 +445,31 @@ mod tests {
             hk.expand(context.as_bytes(), &mut okm)
                 .expect("HKDF loop failed");
         }
+    }
+    #[test]
+    fn test_token_accounting() {
+        let mut tax = EntropyTax::new();
+
+        // Initial balance (bootstrap)
+        assert_eq!(tax.balance(), 1000);
+
+        // Earn tokens
+        tax.earn_tokens(500);
+        assert_eq!(tax.balance(), 1500);
+
+        // Spend tokens
+        assert!(tax.spend_tokens(200).is_ok());
+        assert_eq!(tax.balance(), 1300);
+
+        // Insufficient funds
+        assert!(tax.spend_tokens(2000).is_err());
+        assert_eq!(tax.balance(), 1300); // Balance unchanged
+    }
+
+    #[test]
+    fn test_token_saturation() {
+        let mut tax = EntropyTax::new();
+        tax.earn_tokens(u64::MAX); // Should saturate, not panic
+        assert_eq!(tax.balance(), u64::MAX);
     }
 }

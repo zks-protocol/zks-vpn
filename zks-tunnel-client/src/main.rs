@@ -66,15 +66,15 @@ mod onion;
 
 mod entropy_events;
 mod entropy_tax;
-pub mod true_vernam;
+mod exit_service;
 mod key_rotation;
+mod relay_service;
 mod replay_protection;
 pub mod swarm_entropy_collection;
 mod tls_mimicry;
-mod traffic_shaping;
 mod traffic_mixer;
-mod relay_service;
-mod exit_service;
+mod traffic_shaping;
+pub mod true_vernam;
 
 #[cfg(feature = "swarm")]
 #[cfg(feature = "swarm")]
@@ -625,8 +625,8 @@ pub async fn start_p2p_vpn(
     args: Args,
     room_id: String,
 ) -> Result<p2p_vpn::P2PVpnController, BoxError> {
-    use p2p_vpn::{P2PVpnConfig, P2PVpnController};
     use crate::entropy_tax::EntropyTax;
+    use p2p_vpn::{P2PVpnConfig, P2PVpnController};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
@@ -662,8 +662,8 @@ pub async fn start_p2p_vpn(
         info!("   DNS protection: ENABLED (queries via DoH)");
     }
 
-    let _entropy_tax = Arc::new(Mutex::new(EntropyTax::new()));
-    let vpn = P2PVpnController::new(config);
+    let entropy_tax = Arc::new(Mutex::new(EntropyTax::new()));
+    let vpn = P2PVpnController::new(config, entropy_tax);
     vpn.start().await?;
 
     Ok(vpn)
@@ -872,14 +872,14 @@ async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
     info!("   - VPN Client: {}", config.enable_client);
     info!("   - Relay Service: {}", config.enable_relay);
     info!("   - Exit Service: {}", config.enable_exit);
-    
+
     if config.enable_exit && !args.exit_consent {
         info!("⚠️  Exit Node Active (Default). You are contributing to the swarm!");
         info!("   Use --no-exit to disable if required.");
     }
     info!("");
 
-   // Create and start swarm controller
+    // Create and start swarm controller
     let mut controller = SwarmController::new(config);
 
     info!("📡 Starting swarm services...");

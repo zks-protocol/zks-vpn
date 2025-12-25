@@ -11,9 +11,9 @@
 use futures::StreamExt;
 #[cfg(feature = "swarm")]
 use libp2p::{
-    dcutr, identify, noise, relay,
+    dcutr, identify, kad, noise, relay,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, Swarm, SwarmBuilder,
+    tcp, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder,
 };
 #[cfg(feature = "swarm")]
 use std::time::Duration;
@@ -30,6 +30,8 @@ pub struct SwarmBehaviour {
     dcutr: dcutr::Behaviour,
     /// Identify protocol for peer info exchange
     identify: identify::Behaviour,
+    /// Kademlia DHT for decentralized peer discovery
+    kademlia: kad::Behaviour<kad::store::MemoryStore>,
     /// Ping for keepalive and latency measurement
     ping: libp2p::ping::Behaviour,
 }
@@ -89,10 +91,19 @@ pub async fn create_swarm(
             // Build identify config
             let identify_config = identify::Config::new("/zks/1.0.0".to_string(), keypair.public());
 
+            // Build Kademlia config
+            let kad_store = kad::store::MemoryStore::new(keypair.public().to_peer_id());
+            let kad_config = kad::Config::new(StreamProtocol::new("/zks/kad/1.0.0"));
+
             SwarmBehaviour {
                 relay_client,
                 dcutr: dcutr::Behaviour::new(keypair.public().to_peer_id()),
                 identify: identify::Behaviour::new(identify_config),
+                kademlia: kad::Behaviour::with_config(
+                    keypair.public().to_peer_id(),
+                    kad_store,
+                    kad_config,
+                ),
                 ping: libp2p::ping::Behaviour::default(),
             }
         })?
@@ -171,6 +182,29 @@ pub async fn run_swarm_loop(
             SwarmEvent::Behaviour(SwarmBehaviourEvent::Ping(event)) => {
                 debug!("🏓 Ping event: {:?}", event);
             }
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed { result, .. },
+            )) => {
+                match result {
+                    kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                        providers,
+                        ..
+                    })) => {
+                        for peer_id in providers {
+                            info!("🕸️ DHT found peer: {}", peer_id);
+                            // Swarm will automatically try to connect if we dial or if they are in our routing table?
+                            // No, we should explicitly dial them if we are not connected.
+                            // But for now, just logging. Kademlia might auto-connect depending on config.
+                            // Let's explicitly dial.
+                            let _ = swarm.dial(peer_id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SwarmEvent::Behaviour(SwarmBehaviourEvent::Kademlia(event)) => {
+                debug!("🕸️ Kademlia event: {:?}", event);
+            }
             _ => {}
         }
     }
@@ -221,9 +255,37 @@ pub async fn run_swarm_with_signaling(
                                 if let Err(e) = swarm.dial(addr.clone()) {
                                     warn!("⚠️ Failed to dial {}: {}", addr, e);
                                 }
+
+                                // Add to Kademlia DHT (Hybrid Discovery)
+                                if let Ok(pid) = peer.peer_id.parse::<libp2p::PeerId>() {
+                                    swarm.behaviour_mut().kademlia.add_address(&pid, addr);
+                                }
                             }
                         }
                     }
+
+                    // Bootstrap Kademlia after adding initial peers
+                    if let Err(e) = swarm.behaviour_mut().kademlia.bootstrap() {
+                        warn!("⚠️ Failed to bootstrap Kademlia: {}", e);
+                    } else {
+                        info!("🚀 Kademlia DHT bootstrapping started...");
+                    }
+
+                    // Announce ourselves in the room (DHT Content Routing)
+                    let room_key = kad::RecordKey::new(&config.room_id.as_bytes());
+                    if let Err(e) = swarm
+                        .behaviour_mut()
+                        .kademlia
+                        .start_providing(room_key.clone())
+                    {
+                        warn!("⚠️ Failed to announce presence in DHT: {}", e);
+                    } else {
+                        info!("📢 Announced presence in room '{}' via DHT", config.room_id);
+                    }
+
+                    // Look for other peers in the room (Decentralized Discovery)
+                    swarm.behaviour_mut().kademlia.get_providers(room_key);
+                    info!("🔍 Searching DHT for peers in room '{}'...", config.room_id);
                 }
                 Err(e) => {
                     warn!("⚠️ Failed to get peers: {}", e);
