@@ -896,7 +896,7 @@ async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
         enable_exit: !args.no_exit, // Enabled by default unless explicitly disabled
         room_id: room_id.clone(),
         relay_url: args.relay.clone(),
-        vernam_url: format!("{}/entropy", args.vernam),
+        vernam_url: args.vernam.clone(),
         exit_consent_given: args.exit_consent,
         vpn_address,
         server_mode: args.server,
