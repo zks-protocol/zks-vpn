@@ -466,7 +466,7 @@ fn print_banner(args: &Args) {
             );
             info!(
                 "║  VPN IP: {}                                          ",
-                args.vpn_address
+                args.vpn_address.as_deref().unwrap_or("auto")
             );
         }
         Mode::P2pClient => {
@@ -490,7 +490,7 @@ fn print_banner(args: &Args) {
             info!("║  Room:   {}  ", args.room.as_deref().unwrap_or("none"));
             info!(
                 "║  VPN IP: {}                                          ",
-                args.vpn_address
+                args.vpn_address.as_deref().unwrap_or("auto")
             );
         }
         Mode::EntryNode => {
@@ -588,7 +588,7 @@ async fn run_vpn_mode(_args: Args, _tunnel: TunnelClient) -> Result<(), BoxError
         // Check for admin/root privileges
         check_privileges()?;
 
-        let vpn_addr: std::net::Ipv4Addr = _args.vpn_address.parse()?;
+        let vpn_addr: std::net::Ipv4Addr = _args.vpn_address.clone().unwrap_or("10.0.85.1".to_string()).parse()?;
 
         let config = VpnConfig {
             device_name: _args.tun_name.clone(),
@@ -643,7 +643,7 @@ pub async fn start_p2p_vpn(
     // Check for admin/root privileges
     check_privileges()?;
 
-    let vpn_addr: std::net::Ipv4Addr = args.vpn_address.parse()?;
+    let vpn_addr: std::net::Ipv4Addr = args.vpn_address.clone().unwrap_or("10.0.85.1".to_string()).parse()?;
 
     let config = P2PVpnConfig {
         device_name: args.tun_name.clone(),
@@ -658,6 +658,8 @@ pub async fn start_p2p_vpn(
         proxy: args.proxy.clone(),
 
         exit_peer_address: args.exit_peer_address.parse()?,
+        server_mode: args.server,
+    };
     };
 
     info!("🔒 Starting P2P VPN (Triple-Blind Architecture)...");

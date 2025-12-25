@@ -196,7 +196,6 @@ mod implementation {
         kill_switch: Arc<Mutex<KillSwitch>>,
         dns_guard: Arc<Mutex<Option<DnsGuard>>>,
         entropy_tax: Arc<Mutex<EntropyTax>>,
-        entropy_tax: Arc<Mutex<EntropyTax>>,
         inject_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
         outbound_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
     }
@@ -219,9 +218,6 @@ mod implementation {
                 dns_pending: Arc::new(RwLock::new(HashMap::new())),
                 dns_response_tx: Arc::new(RwLock::new(None)),
                 kill_switch: Arc::new(Mutex::new(KillSwitch::new())),
-                dns_guard: Arc::new(Mutex::new(None)),
-                dns_guard: Arc::new(Mutex::new(None)),
-                entropy_tax,
                 dns_guard: Arc::new(Mutex::new(None)),
                 entropy_tax,
                 inject_tx: Arc::new(RwLock::new(None)),

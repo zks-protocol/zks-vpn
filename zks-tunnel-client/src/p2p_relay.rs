@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{client_async, WebSocketStream};
 use tracing::{debug, info, warn};
 use url::Url;
-use zks_tunnel_proto::TunnelMessage;
+pub use zks_tunnel_proto::TunnelMessage;
 
 /// Peer role in the VPN relay
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

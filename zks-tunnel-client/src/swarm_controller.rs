@@ -105,6 +105,7 @@ pub struct SwarmController {
 
     /// Shutdown signal
     shutdown_tx: Option<mpsc::Sender<()>>,
+    shutdown_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
 }
 
 impl SwarmController {
@@ -318,7 +319,7 @@ impl SwarmController {
                                                     
                                                     // Update routing table
                                                     {
-                                                        let mut r = routes.write().await;
+                                                        let mut r: tokio::sync::RwLockWriteGuard<'_, HashMap<Ipv4Addr, mpsc::Sender<TunnelMessage>>> = routes.write().await;
                                                         if !r.contains_key(&src_ip) {
                                                             info!("🆕 Learned route: {} -> Client", src_ip);
                                                             r.insert(src_ip, client_tx.clone());
@@ -385,7 +386,7 @@ impl SwarmController {
 
                             // Lookup route
                             let tx = {
-                                let r = routes.read().await;
+                                let r: tokio::sync::RwLockReadGuard<'_, HashMap<Ipv4Addr, mpsc::Sender<TunnelMessage>>> = routes.read().await;
                                 r.get(&dst_ip).cloned()
                             };
 
