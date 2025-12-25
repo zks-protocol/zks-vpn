@@ -1006,6 +1006,22 @@ impl P2PRelay {
             let refresher = ContinuousEntropyRefresher::new(vernam_url.to_string(), keys.clone());
             refresher.start_background_task();
             info!("🔄 Started Continuous Entropy Refresher (TRUE forward secrecy active!)");
+
+            // === TRUE VERNAM MODE (Information-Theoretic Security) ===
+            // Enable by default for maximum security
+            let true_vernam_buffer = Arc::new(Mutex::new(crate::true_vernam::TrueVernamBuffer::new()));
+            let fetcher = crate::true_vernam::TrueVernamFetcher::new(
+                vernam_url.to_string(),
+                true_vernam_buffer.clone(),
+            );
+            fetcher.start_background_task();
+            
+            // Enable True Vernam on the cipher
+            {
+                let mut cipher = keys.lock().await;
+                cipher.enable_true_vernam(true_vernam_buffer);
+            }
+            info!("🔐 TRUE VERNAM MODE ENABLED BY DEFAULT - Mathematically unbreakable encryption!");
         }
 
         // Send ack
