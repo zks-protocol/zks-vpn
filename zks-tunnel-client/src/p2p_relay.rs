@@ -959,6 +959,14 @@ impl P2PRelay {
                                 // Send KeyConfirm
                                 self.send_text(key_confirm.to_json()).await?;
                             }
+                            KeyExchangeMessage::KeyConfirm { .. } => {
+                                // Finalize key exchange (Responder side)
+                                if let Err(e) = self.key_exchange.lock().await.process_key_confirm(&ke_msg) {
+                                    warn!("Failed to process KeyConfirm: {}", e);
+                                } else {
+                                    info!("✅ Key exchange finalized (Responder received KeyConfirm)!");
+                                }
+                            }
                             _ => {}
                         }
                     }
