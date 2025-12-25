@@ -289,8 +289,18 @@ Achieving **Information-Theoretic Security** comes with a physical cost.
 | Buffer Size | 1 MB (default) |
 | Refill Threshold | 512 KB |
 | Fetch Interval | 100 ms |
-| Chunk Size | 32 bytes (SHA256 output) |
-| Throughput | ~13 MB/s (pure XOR) |
+| Chunk Size | **32 KB** (Bulk Fetch) |
+| Fallback Mode | HKDF expansion (if buffer empty) |
+
+### How it works (Bulk Fetching)
+We do **NOT** make a request for every message. That would be too slow.
+
+1.  **Background Task:** A separate thread wakes up every 100ms.
+2.  **Bulk Fetch:** It downloads **32KB** of entropy at once from the Worker/Peers.
+3.  **Buffer Fill:** These bytes go into the **1MB Ring Buffer**.
+4.  **Encryption:** When you send a message, we instantly grab the needed bytes from this local buffer.
+
+**Result:** Zero latency for encryption, as long as the background task keeps the buffer full.
 
 ## Implementation
 
