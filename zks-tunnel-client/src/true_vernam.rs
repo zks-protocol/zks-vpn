@@ -14,7 +14,7 @@ use tokio::time::{interval, Duration};
 use tracing::{debug, info, warn};
 
 /// Minimum buffer size before we start warning
-const MIN_BUFFER_SIZE: usize = 1024 * 64; // 64KB
+const MIN_BUFFER_SIZE: usize = 1024 * 256; // 256KB (increased from 64KB)
 
 /// Target buffer size to maintain
 const TARGET_BUFFER_SIZE: usize = 1024 * 1024; // 1MB
@@ -153,8 +153,8 @@ impl TrueVernamFetcher {
             }
             info!("✅ True Vernam: Initial buffer ready!");
 
-            // Continuous refill loop
-            let mut interval = interval(Duration::from_millis(100)); // Check every 100ms
+            // Continuous refill loop - check every 10 seconds instead of 100ms
+            let mut interval = interval(Duration::from_secs(10)); // Reduced from 100ms to save API calls
 
             loop {
                 interval.tick().await;
@@ -238,8 +238,9 @@ impl TrueVernamFetcher {
     async fn fetch_worker_entropy(
         &self,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        // Fetch 32KB of entropy (1024 chunks of 32 bytes) to reduce API calls
         let url = format!(
-            "{}/entropy?size=32&n=1",
+            "{}/entropy?size=32&n=1024",
             self.vernam_url.trim_end_matches('/')
         );
         let response = reqwest::get(&url).await?;
@@ -250,10 +251,25 @@ impl TrueVernamFetcher {
 
         let body = response.text().await?;
         let json: serde_json::Value = serde_json::from_str(&body)?;
-        let entropy_hex = json["entropy"].as_str().ok_or("Missing entropy field")?;
-        let entropy_bytes = hex::decode(entropy_hex)?;
-
-        Ok(entropy_bytes)
+        
+        // Handle both single entropy response and array of entropy values
+        if let Some(entropy_hex) = json["entropy"].as_str() {
+            // Single entropy value
+            let entropy_bytes = hex::decode(entropy_hex)?;
+            Ok(entropy_bytes)
+        } else if let Some(entropy_array) = json["entropy"].as_array() {
+            // Multiple entropy values - concatenate them
+            let mut all_entropy = Vec::new();
+            for entry in entropy_array {
+                if let Some(hex_str) = entry.as_str() {
+                    let bytes = hex::decode(hex_str)?;
+                    all_entropy.extend(bytes);
+                }
+            }
+            Ok(all_entropy)
+        } else {
+            Err("Missing entropy field".into())
+        }
     }
 }
 
