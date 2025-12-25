@@ -33,8 +33,8 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
 
         let flags = GAA_FLAG_SKIP_ANYCAST
             | GAA_FLAG_SKIP_MULTICAST
-            | GAA_FLAG_SKIP_DNS_SERVER
-            | GAA_FLAG_SKIP_FRIENDLY_NAME;
+            | GAA_FLAG_SKIP_DNS_SERVER;
+            // Note: Removed GAA_FLAG_SKIP_FRIENDLY_NAME to allow searching by FriendlyName
 
         let status = GetAdaptersAddresses(
             AF_UNSPEC as u32,
@@ -64,22 +64,44 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
             }
         }
 
+
         let mut adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        let mut all_adapters: Vec<String> = Vec::new();
+        
         while !adapter.is_null() {
             let adapter_ref = &*adapter;
+            let pattern_lower = name_pattern.to_lowercase();
+            let index = adapter_ref.Anonymous1.Anonymous.IfIndex;
 
-            // Get adapter name (FriendlyName would be null due to flag, use AdapterName)
+            // Check AdapterName (GUID-like name)
             if !adapter_ref.AdapterName.is_null() {
                 let adapter_name = std::ffi::CStr::from_ptr(adapter_ref.AdapterName as *const i8)
                     .to_string_lossy();
+                all_adapters.push(format!("{}(idx:{})", adapter_name, index));
 
-                // Check if adapter name contains the pattern (e.g., "tun")
-                if adapter_name
-                    .to_lowercase()
-                    .contains(&name_pattern.to_lowercase())
-                {
-                    let index = adapter_ref.Anonymous1.Anonymous.IfIndex;
-                    info!("Found TUN adapter: {} (index: {})", adapter_name, index);
+                if adapter_name.to_lowercase().contains(&pattern_lower) {
+                    info!("Found TUN adapter by AdapterName: {} (index: {})", adapter_name, index);
+                    return Ok(index);
+                }
+            }
+
+            // Check FriendlyName (user-visible name like "Wintun Userspace Tunnel")
+            if !adapter_ref.FriendlyName.is_null() {
+                // FriendlyName is a wide string (PWSTR)
+                let friendly_name = widestring_to_string(adapter_ref.FriendlyName);
+                
+                if friendly_name.to_lowercase().contains(&pattern_lower) {
+                    info!("Found TUN adapter by FriendlyName: {} (index: {})", friendly_name, index);
+                    return Ok(index);
+                }
+            }
+
+            // Check Description (e.g., "Wintun Tunnel")
+            if !adapter_ref.Description.is_null() {
+                let description = widestring_to_string(adapter_ref.Description);
+                
+                if description.to_lowercase().contains(&pattern_lower) {
+                    info!("Found TUN adapter by Description: {} (index: {})", description, index);
                     return Ok(index);
                 }
             }
@@ -87,7 +109,24 @@ pub fn get_tun_interface_index(name_pattern: &str) -> Result<u32> {
             adapter = adapter_ref.Next;
         }
 
+        debug!("Available adapters: {:?}", all_adapters);
         Err(format!("No adapter matching '{}' found", name_pattern).into())
+    }
+}
+
+/// Helper function to convert Windows wide string (PWSTR) to Rust String
+#[cfg(target_os = "windows")]
+fn widestring_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    
+    unsafe {
+        let mut len = 0;
+        while *ptr.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
     }
 }
 

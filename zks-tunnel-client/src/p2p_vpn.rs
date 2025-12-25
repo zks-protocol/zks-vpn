@@ -464,8 +464,9 @@ mod implementation {
             {
                 info!("Removing VPN routes...");
 
-                // Get TUN interface index for route deletion
-                if let Ok(tun_if_index) = windows_routing::get_tun_interface_index("tun") {
+                // Get TUN interface index for route deletion (try wintun first, then tun)
+                if let Ok(tun_if_index) = windows_routing::get_tun_interface_index("wintun")
+                    .or_else(|_| windows_routing::get_tun_interface_index(&self.config.device_name)) {
                     let tun_ip = self.config.address;
 
                     // Remove IPv4 split-tunnel routes using Win32 API
@@ -738,18 +739,38 @@ mod implementation {
                     .mtu(self.config.mtu)
                     .build_async()?;
 
+                // Get actual device name from tun-rs (critical for Windows Wintun)
+                let actual_device_name = match device.name() {
+                    Ok(name) => {
+                        info!("TUN device created with name: {}", name);
+                        name
+                    }
+                    Err(e) => {
+                        warn!("Could not get device name: {}, will try pattern matching", e);
+                        self.config.device_name.clone()
+                    }
+                };
+
                 // Set up routing to capture all traffic through the VPN tunnel
                 #[cfg(target_os = "windows")]
                 if !self.config.server_mode {
                     info!("Setting up routes to capture traffic...");
 
-                    // Get TUN interface index using Win32 API
-                    let tun_if_index = match windows_routing::get_tun_interface_index("tun") {
+                    // Get TUN interface index using the ACTUAL device name from tun-rs
+                    // On Windows, Wintun creates adapters with GUID-like names
+                    let tun_if_index = match windows_routing::get_tun_interface_index(&actual_device_name) {
                         Ok(idx) => idx,
                         Err(e) => {
-                            error!("Failed to get TUN interface index: {}", e);
-                            error!("VPN routing will not work.");
-                            return Err(e);
+                            // Fallback: try searching by description "Wintun" if name search fails
+                            warn!("Device name '{}' not found, trying Wintun pattern...", actual_device_name);
+                            match windows_routing::get_tun_interface_index("wintun") {
+                                Ok(idx) => idx,
+                                Err(_) => {
+                                    error!("Failed to get TUN interface index: {}", e);
+                                    error!("VPN routing will not work. Make sure Wintun driver is installed.");
+                                    return Err(e);
+                                }
+                            }
                         }
                     };
 
