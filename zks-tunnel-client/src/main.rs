@@ -210,7 +210,17 @@ pub struct Args {
 
     /// Swarm: Disable exit service (default: disabled, requires --exit-consent)
     #[arg(long)]
+    /// Swarm: Disable exit service (default: disabled, requires --exit-consent)
+    #[arg(long)]
     no_exit: bool,
+
+    /// Swarm: Disable VPN client (default: enabled)
+    #[arg(long)]
+    no_client: bool,
+
+    /// Swarm: Run in Server Mode (Exit Node with NAT, no default route change)
+    #[arg(long)]
+    server: bool,
 
     /// Upstream SOCKS5 proxy (e.g., 127.0.0.1:9050) to route traffic through
     #[arg(long)]
@@ -858,13 +868,15 @@ async fn run_swarm_mode(args: Args, room_id: String) -> Result<(), BoxError> {
 
     // Create swarm configuration from CLI args
     let config = SwarmControllerConfig {
-        enable_client: true,
+        enable_client: !args.no_client,
         enable_relay: !args.no_relay,
         enable_exit: !args.no_exit, // Enabled by default unless explicitly disabled
         room_id: room_id.clone(),
         relay_url: args.relay.clone(),
         vernam_url: format!("{}/entropy", args.vernam),
         exit_consent_given: args.exit_consent,
+        vpn_address: args.vpn_address.clone(),
+        server_mode: args.server,
     };
 
     info!("🔧 Configuration:");

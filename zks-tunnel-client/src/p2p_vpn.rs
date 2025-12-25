@@ -120,6 +120,8 @@ mod implementation {
         /// Exit Peer's VPN IP address (gateway for routing)
         #[allow(dead_code)]
         pub exit_peer_address: Ipv4Addr,
+        /// Server mode (Exit Node) - skip default route, enable NAT
+        pub server_mode: bool,
     }
 
     impl Default for P2PVpnConfig {
@@ -136,6 +138,7 @@ mod implementation {
                 room_id: String::new(),
                 proxy: None,
                 exit_peer_address: Ipv4Addr::new(10, 0, 85, 2),
+                server_mode: false,
             }
         }
     }
@@ -193,6 +196,9 @@ mod implementation {
         kill_switch: Arc<Mutex<KillSwitch>>,
         dns_guard: Arc<Mutex<Option<DnsGuard>>>,
         entropy_tax: Arc<Mutex<EntropyTax>>,
+        entropy_tax: Arc<Mutex<EntropyTax>>,
+        inject_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
+        outbound_tx: Arc<RwLock<Option<mpsc::Sender<Vec<u8>>>>>,
     }
 
     impl P2PVpnController {
@@ -214,7 +220,28 @@ mod implementation {
                 dns_response_tx: Arc::new(RwLock::new(None)),
                 kill_switch: Arc::new(Mutex::new(KillSwitch::new())),
                 dns_guard: Arc::new(Mutex::new(None)),
+                dns_guard: Arc::new(Mutex::new(None)),
                 entropy_tax,
+                dns_guard: Arc::new(Mutex::new(None)),
+                entropy_tax,
+                inject_tx: Arc::new(RwLock::new(None)),
+                outbound_tx: Arc::new(RwLock::new(None)),
+            }
+        }
+
+        /// Get the outbound packet receiver (for Server Mode)
+        pub async fn get_outbound_rx(&self) -> Option<mpsc::Receiver<Vec<u8>>> {
+            let (tx, rx) = mpsc::channel(1000);
+            let mut guard = self.outbound_tx.write().await;
+            *guard = Some(tx);
+            Some(rx)
+        }
+
+        /// Inject a raw IP packet into the TUN interface (for Exit Node functionality)
+        pub async fn inject_packet(&self, packet: Vec<u8>) {
+            let tx_guard = self.inject_tx.read().await;
+            if let Some(tx) = tx_guard.as_ref() {
+                let _ = tx.send(packet).await;
             }
         }
 
@@ -717,7 +744,7 @@ mod implementation {
 
                 // Set up routing to capture all traffic through the VPN tunnel
                 #[cfg(target_os = "windows")]
-                {
+                if !self.config.server_mode {
                     info!("Setting up routes to capture traffic...");
 
                     // Get TUN interface index using Win32 API
@@ -871,6 +898,8 @@ mod implementation {
                     }
 
                     info!("✅ All VPN routes configured - traffic will go via VPN");
+                } else {
+                    info!("Server Mode: Skipping client routing configuration");
                 }
 
                 // Enable DNS leak protection if configured
@@ -926,7 +955,27 @@ mod implementation {
                 crate::tun_multiqueue::MultiQueueTun::new(&self.config.device_name, num_queues)?;
 
             // Setup routing (Linux specific)
-            {
+            if self.config.server_mode {
+                info!("Server Mode: Skipping default route setup. Enabling NAT...");
+                // Enable IP forwarding
+                let _ = std::process::Command::new("sysctl")
+                    .args(["-w", "net.ipv4.ip_forward=1"])
+                    .output();
+                // Enable Masquerade for VPN subnet
+                let _ = std::process::Command::new("iptables")
+                    .args([
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-s",
+                        "10.0.85.0/24",
+                        "-j",
+                        "MASQUERADE",
+                    ])
+                    .output();
+                info!("✅ NAT Masquerade enabled for 10.0.85.0/24");
+            } else {
                 info!("Setting up routes to capture traffic...");
                 // Route via Exit Peer's VPN IP using rtnetlink API
                 let gateway = self.config.exit_peer_address;
@@ -1119,6 +1168,29 @@ mod implementation {
             // Clone relay for tasks
             let relay_for_send = relay.clone();
             let relay_for_recv = relay.clone();
+
+            // Setup injection channel
+            let (inject_tx, mut inject_rx) = mpsc::channel(1000);
+            {
+                let mut tx_guard = self.inject_tx.write().await;
+                *tx_guard = Some(inject_tx);
+            }
+
+            // Spawn injection task (Exit Node -> TUN)
+            let device_writer_inject = device_writer.clone();
+            let running_inject = running.clone();
+            tokio::spawn(async move {
+                while running_inject.load(Ordering::SeqCst) {
+                    if let Some(packet) = inject_rx.recv().await {
+                        // debug!("Injecting packet: {} bytes", packet.len());
+                        if let Err(e) = device_writer_inject.send(&packet).await {
+                            warn!("Failed to inject packet: {}", e);
+                        }
+                    } else {
+                        break; // Channel closed
+                    }
+                }
+            });
 
             // Spawn the unified message handler (Relay -> TUN/Streams/DNS)
             let streams = self.streams.clone();

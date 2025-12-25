@@ -42,6 +42,12 @@ pub struct SwarmControllerConfig {
 
     /// Exit node consent (legal requirement)
     pub exit_consent_given: bool,
+
+    /// VPN IP address (to avoid conflict)
+    pub vpn_address: String,
+
+    /// Server mode (Exit Node) - skip default route, enable NAT
+    pub server_mode: bool,
 }
 
 impl Default for SwarmControllerConfig {
@@ -54,6 +60,8 @@ impl Default for SwarmControllerConfig {
             relay_url: "wss://zks-tunnel-relay.md-wasif-faisal.workers.dev".to_string(),
             vernam_url: "https://zks-key.md-wasif-faisal.workers.dev/entropy".to_string(),
             exit_consent_given: false,
+            vpn_address: "10.0.85.1".to_string(),
+            server_mode: false,
         }
     }
 }
@@ -176,13 +184,14 @@ impl SwarmController {
                 room_id: self.config.room_id.clone(),
                 vernam_url: self.config.vernam_url.clone(),
                 device_name: "zks0".to_string(),
-                address: "10.0.85.1".parse().unwrap(),
+                address: self.config.vpn_address.parse().unwrap(),
                 netmask: "255.255.255.0".parse().unwrap(),
                 mtu: 1400,
                 dns_protection: true,
                 kill_switch: false,
                 proxy: None,
                 exit_peer_address: "10.0.85.2".parse().unwrap(),
+                server_mode: self.config.server_mode,
             };
 
             let controller = P2PVpnController::new(config, self.entropy_tax.clone());
@@ -244,6 +253,8 @@ impl SwarmController {
         let relay_url = self.config.relay_url.clone();
         let vernam_url = self.config.vernam_url.clone();
         let room_id = self.config.room_id.clone();
+        let vpn_client = self.vpn_client.clone();
+        let server_mode = self.config.server_mode;
 
         tokio::spawn(async move {
             loop {
@@ -258,12 +269,57 @@ impl SwarmController {
                 .await
                 {
                     Ok(relay) => {
-                        info!("🌍 Exit Service CONNECTED to a client! (Tunnel established)");
-                        // Keep connection alive
-                        while let Ok(_msg) = relay.recv().await {
-                            // TODO: Forward to ExitService
+                        info!("🌍 Exit Service CONNECTED to a client!");
+                        let relay = std::sync::Arc::new(relay);
+
+                        // If in Server Mode, setup bidirectional forwarding with TUN
+                        if server_mode && vpn_client.is_some() {
+                            let client = vpn_client.as_ref().unwrap();
+
+                            // 1. TUN -> Relay (Outbound)
+                            // We need to get a new receiver for each connection
+                            // Note: This assumes single client connection at a time for now
+                            let outbound_rx_opt = client.lock().await.get_outbound_rx().await;
+                            
+                            if let Some(mut outbound_rx) = outbound_rx_opt {
+                                let relay_send = relay.clone();
+                                tokio::spawn(async move {
+                                    while let Some(packet) = outbound_rx.recv().await {
+                                        let msg = crate::p2p_relay::TunnelMessage::IpPacket {
+                                            payload: bytes::Bytes::from(packet),
+                                        };
+                                        if let Err(e) = relay_send.send(&msg).await {
+                                            warn!("Failed to forward outbound packet to client: {}", e);
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
+
+                            // 2. Relay -> TUN (Inbound)
+                            while let Ok(msg) = relay.recv().await {
+                                if let Some(msg) = msg {
+                                    match msg {
+                                        crate::p2p_relay::TunnelMessage::IpPacket { payload } => {
+                                            // Inject into TUN
+                                            client.lock().await.inject_packet(payload.to_vec()).await;
+                                        }
+                                        _ => {
+                                            debug!("Exit Service received non-IP message: {:?}", msg);
+                                        }
+                                    }
+                                } else {
+                                    break; // Connection closed
+                                }
+                            }
+                        } else {
+                            // Legacy/Placeholder mode (just keep alive)
+                            while let Ok(_msg) = relay.recv().await {
+                                // TODO: Forward to ExitService (SOCKS/HTTP)
+                            }
                         }
-                        warn!("🌍 Exit Service client disconnected");
+
+                        warn!("🌍 Exit Service connection closed. Restarting listener...");
                     }
                     Err(e) => {
                         // Don't log "timeout" as error, it's normal waiting
