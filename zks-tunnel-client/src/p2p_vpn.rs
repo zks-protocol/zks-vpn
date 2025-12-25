@@ -245,7 +245,6 @@ mod implementation {
                 }
             };
 
-
             {
                 let mut relay_guard = self.relay.write().await;
                 *relay_guard = Some(relay.clone());
