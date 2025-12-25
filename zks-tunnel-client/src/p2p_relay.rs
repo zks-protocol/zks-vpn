@@ -396,6 +396,7 @@ impl WasifVernam {
     }
 
     /// Get the swarm seed (for sharing with peer)
+    #[allow(dead_code)]
     pub fn get_remote_key(&self) -> &[u8] {
         if self.has_swarm_entropy {
             &self.swarm_seed
@@ -405,11 +406,13 @@ impl WasifVernam {
     }
 
     /// Check if swarm entropy is available
+    #[allow(dead_code)]
     pub fn has_swarm_entropy(&self) -> bool {
         self.has_swarm_entropy
     }
 
     /// Get the swarm seed as a fixed-size array (for True Vernam fetcher)
+    #[allow(dead_code)]
     pub fn get_swarm_seed(&self) -> [u8; 32] {
         self.swarm_seed
     }
@@ -961,7 +964,9 @@ impl P2PRelay {
                             }
                             KeyExchangeMessage::KeyConfirm { .. } => {
                                 // Finalize key exchange (Responder side)
-                                if let Err(e) = self.key_exchange.lock().await.process_key_confirm(&ke_msg) {
+                                if let Err(e) =
+                                    self.key_exchange.lock().await.process_key_confirm(&ke_msg)
+                                {
                                     warn!("Failed to process KeyConfirm: {}", e);
                                 } else {
                                     info!("✅ Key exchange finalized (Responder received KeyConfirm)!");
