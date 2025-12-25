@@ -1,13 +1,30 @@
 # Wasif-Vernam: Information-Theoretic Security
 
-## Overview
+## The Big Picture: Where is everything used?
 
-The **Wasif-Vernam** cipher is a novel encryption scheme designed for the ZKS Protocol that provides **information-theoretic security**—mathematically unbreakable encryption using truly random, non-repeating key material from multiple independent entropy sources.
+The ZKS Protocol uses different algorithms for different stages of the connection. Here is the simple breakdown:
 
-Unlike traditional ciphers that rely on computational hardness assumptions, Wasif-Vernam achieves perfect secrecy through:
-- **Triple-source entropy mixing** (trustless randomness)
-- **Defense-in-depth layering** (XOR + ChaCha20-Poly1305)
-- **One-time key consumption** (never reused)
+### 1. The Handshake (Getting a Key)
+*Before we can send data, we need to agree on a secret key.*
+
+| Algorithm | Type | Purpose |
+|-----------|------|---------|
+| **X25519** | Classical | Standard, fast key exchange. |
+| **ML-KEM-768** | Post-Quantum | Protects against future quantum computers. |
+
+👉 **Result:** These two combine to create the **Session Key**.
+
+### 2. The Encryption (Sending Data)
+*Now we use that Session Key to protect your traffic.*
+
+**Wasif-Vernam** is the encryption method used here. It has two layers:
+
+| Layer | Algorithm | Source | Purpose |
+|-------|-----------|--------|---------|
+| **1. Inner** | **XOR (True Vernam)** | Triple-Source Entropy | **Unbreakable Math.** Uses truly random bytes. |
+| **2. Outer** | **ChaCha20-Poly1305** | **Session Key** (from Handshake) | **Defense-in-Depth.** Standard military-grade encryption. |
+
+---
 
 ## Architecture
 
@@ -27,7 +44,7 @@ Unlike traditional ciphers that rely on computational hardness assumptions, Wasi
 │        ▼                                                    │
 │   ┌─────────────────────────────────────┐                   │
 │   │   ChaCha20-Poly1305 AEAD            │ ← Defense-in-    │
-│   │   (Session Key from Handshake)      │   depth          │
+│   │   (Session Key from ML-KEM + X25519)│   depth          │
 │   └─────────────────────────────────────┘                   │
 │        │                                                    │
 │        ▼                                                    │
@@ -38,15 +55,71 @@ Unlike traditional ciphers that rely on computational hardness assumptions, Wasi
 
 ### Mathematical Formula
 
-$$Ciphertext = ChaCha20Poly1305(Plaintext \oplus TrueRandomKey)$$
+$$Ciphertext = ChaCha20Poly1305_{K}(Plaintext \oplus TrueRandomKey)$$
 
-Where `TrueRandomKey` is derived from:
+Where:
+- `K` = Session key from hybrid handshake: $$K = HKDF(X25519_{SS} \mathbin\| MLKEM_{SS})$$
+- `TrueRandomKey` = Triple-source entropy: $$SHA256(LocalCSPRNG \mathbin\| WorkerEntropy \mathbin\| SwarmSeed \mathbin\| Timestamp)$$
 
-$$TrueRandomKey = SHA256(LocalCSPRNG \mathbin\| WorkerEntropy \mathbin\| SwarmSeed \mathbin\| Timestamp)$$
+## Post-Quantum Key Exchange (ML-KEM-768)
+
+The session key for ChaCha20-Poly1305 is derived from a **hybrid post-quantum handshake**:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  HYBRID KEY EXCHANGE                             │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  Client                                Exit                      │
+│    │                                     │                       │
+│    │  [X25519_PK, ML-KEM-768_PK]        │                       │
+│    │ ───────────────────────────────────▶│                       │
+│    │                                     │                       │
+│    │  [X25519_PK, ML-KEM-768_CT, MAC]   │                       │
+│    │◀─────────────────────────────────── │                       │
+│    │                                     │                       │
+│    │           Session Key               │                       │
+│    │  K = HKDF(X25519_SS || ML-KEM_SS)  │                       │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### ML-KEM-768 (FIPS 203)
+
+```rust
+use ml_kem::{MlKem768, Encapsulate, Decapsulate};
+
+// Client generates keypair
+let (ek, dk) = MlKem768::generate(&mut rng);
+
+// Exit encapsulates shared secret
+let (ciphertext, shared_secret) = ek.encapsulate(&mut rng)?;
+
+// Client decapsulates
+let shared_secret = dk.decapsulate(&ciphertext)?;
+```
+
+| Property | Value |
+|----------|-------|
+| **Algorithm** | ML-KEM-768 (Kyber) |
+| **Standard** | NIST FIPS 203 (August 2024) |
+| **Security Level** | 192-bit post-quantum |
+| **Public Key Size** | 1184 bytes |
+| **Ciphertext Size** | 1088 bytes |
+| **Shared Secret** | 32 bytes |
+
+### Hybrid Security Guarantee
+
+$$SessionKey = HKDF(X25519_{SS} \mathbin\| MLKEM_{SS}, room\_id)$$
+
+**Key Insight:** If EITHER X25519 OR ML-KEM-768 is secure, the session key is secure. This provides:
+- **Classical security** via X25519 (Curve25519)
+- **Post-quantum security** via ML-KEM-768 (Kyber)
 
 ## Triple-Source Entropy
 
 Wasif-Vernam achieves **trustless security** by combining entropy from three independent sources:
+
 
 ### Source 1: Local CSPRNG
 ```rust
