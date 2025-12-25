@@ -186,7 +186,8 @@ pub async fn run_swarm_loop(
                 kad::Event::OutboundQueryProgressed {
                     result:
                         kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
-                            providers, ..
+                            providers,
+                            ..
                         })),
                     ..
                 },
