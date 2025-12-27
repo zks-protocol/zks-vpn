@@ -95,7 +95,6 @@ pub struct KeyExchange {
     kyber_shared_secret: Option<SharedKey<MlKem768>>,
 }
 
-
 impl std::fmt::Debug for KeyExchange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyExchange")
@@ -257,7 +256,7 @@ impl KeyExchange {
             if let Some(our_pk) = &self.ephemeral_public {
                 let our_pk_bytes = our_pk.to_bytes();
                 let peer_pk_bytes_res = hex::decode(peer_eph_pk_hex);
-                
+
                 if let Ok(peer_pk_bytes) = peer_pk_bytes_res {
                     if our_pk_bytes.as_slice() == peer_pk_bytes.as_slice() {
                         return Err("Ignored self-message (AuthInit echo)");
@@ -274,7 +273,7 @@ impl KeyExchange {
                         self.ephemeral_secret = None;
                         self.ephemeral_public = None;
                         self.peer_ephemeral_public = None;
-                        
+
                         // Generate fresh ephemeral keys for Responder role
                         let secret = EphemeralSecret::random_from_rng(OsRng);
                         let public = PublicKey::from(&secret);
@@ -425,7 +424,7 @@ impl KeyExchange {
     ) -> Result<KeyExchangeMessage, &'static str> {
         // Verify state
         if self.state != KeyExchangeState::InitiatorWaitingForResponse {
-             return Err("Ignored: Unexpected AuthResponse - not in Initiator state");
+            return Err("Ignored: Unexpected AuthResponse - not in Initiator state");
         }
 
         let (peer_eph_pk_hex, auth_mac_hex, kyber_ct_hex) = match auth_response {

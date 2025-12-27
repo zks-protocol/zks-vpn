@@ -201,8 +201,9 @@ impl WasifVernam {
         // Extract nonce and offset
         let nonce = Nonce::from_slice(&data[0..12]);
         let key_offset = u64::from_be_bytes(
-            data[12..20].try_into()
-                .map_err(|_| chacha20poly1305::aead::Error)?
+            data[12..20]
+                .try_into()
+                .map_err(|_| chacha20poly1305::aead::Error)?,
         );
         let ciphertext = &data[20..];
 
@@ -839,24 +840,23 @@ impl P2PRelay {
     /// Wait for the key exchange to complete
     pub async fn wait_for_handshake(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use tokio::time::{timeout, Duration};
-        
+
         info!("⏳ Waiting for key exchange to complete...");
-        
+
         // Wait up to 30 seconds for handshake
         let result = timeout(Duration::from_secs(30), async {
             while !self.key_exchange_complete.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-        }).await;
+        })
+        .await;
 
         match result {
             Ok(_) => {
                 info!("✅ Key exchange completed successfully");
                 Ok(())
             }
-            Err(_) => {
-                Err("Key exchange timed out".into())
-            }
+            Err(_) => Err("Key exchange timed out".into()),
         }
     }
 
@@ -1014,9 +1014,13 @@ impl P2PRelay {
                                         // We are the winner - the other peer should yield to us.
                                         // But since they may not have received our original AuthInit
                                         // (we might have sent it before they joined), resend it now.
-                                        if let Ok(auth_init) = self.key_exchange.lock().await.create_auth_init() {
+                                        if let Ok(auth_init) =
+                                            self.key_exchange.lock().await.create_auth_init()
+                                        {
                                             info!("🔄 Resending AuthInit (collision winner ensuring peer receives it)");
-                                            if let Err(e) = self.send_text(auth_init.to_json()).await {
+                                            if let Err(e) =
+                                                self.send_text(auth_init.to_json()).await
+                                            {
                                                 warn!("Failed to resend AuthInit: {}", e);
                                             }
                                         }
@@ -1035,7 +1039,7 @@ impl P2PRelay {
                                     let mut ke = self.key_exchange.lock().await;
                                     ke.process_auth_response_and_confirm(&ke_msg)
                                 };
-                                
+
                                 match result {
                                     Ok(key_confirm) => {
                                         let shared_secret = {
@@ -1061,7 +1065,11 @@ impl P2PRelay {
                                         // Silently ignore duplicate AuthResponse
                                     }
                                     Err(e) => {
-                                        return Err(format!("Failed to handle AuthResponse: {}", e).into());
+                                        return Err(format!(
+                                            "Failed to handle AuthResponse: {}",
+                                            e
+                                        )
+                                        .into());
                                     }
                                 }
                             }

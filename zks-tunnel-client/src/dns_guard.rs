@@ -105,14 +105,14 @@ impl Drop for DnsGuard {
     fn drop(&mut self) {
         if self.enabled {
             warn!("DNS guard dropped while still enabled - attempting cleanup");
-            
+
             // Try to get current tokio runtime and reset DNS
             // This is critical for preventing DNS leaks after VPN disconnects
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let _ = handle.block_on(async {
                     #[cfg(target_os = "windows")]
                     let _ = self.inner.reset_dns().await;
-                    
+
                     #[cfg(target_os = "linux")]
                     let _ = self.inner.reset_dns().await;
                 });
@@ -122,7 +122,7 @@ impl Drop for DnsGuard {
                 // OS will typically restore DNS on network adapter reset
                 warn!("⚠️ No tokio runtime - DNS may need manual restoration");
             }
-            
+
             self.enabled = false;
         }
     }

@@ -1,5 +1,0 @@
-2025-12-16T13:45:10.9200000Z Requested labels: macos-latest
-2025-12-16T13:45:10.9200000Z Job defined at: cswasif/ZKS-Tunnel-VPN/.github/workflows/ci.yml@refs/heads/master
-2025-12-16T13:45:10.9200000Z Waiting for a runner to pick up this job...
-2025-12-16T13:45:11.3860000Z Job is about to start running on the hosted runner: GitHub Actions 1000001383
-2025-12-16T13:45:11.3850000Z Job is waiting for a hosted runner to come online.

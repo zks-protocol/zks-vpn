@@ -234,7 +234,7 @@ impl SwarmController {
             };
 
             let controller = P2PVpnController::new(config, self.entropy_tax.clone());
-            
+
             // CRITICAL FIX: Pass shared_relay to VPN client to prevent duplicate key exchange
             if let Some(relay) = &self.shared_relay {
                 info!("🔗 Passing shared P2PRelay to VPN client (single key exchange)");
@@ -242,7 +242,7 @@ impl SwarmController {
             } else {
                 warn!("⚠️ No shared relay available - VPN client will create its own connection");
             }
-            
+
             self.vpn_client = Some(Arc::new(Mutex::new(controller)));
 
             // Start VPN in background
@@ -303,12 +303,13 @@ impl SwarmController {
             exit_service.run().await;
         });
 
-
         // Use the shared relay connection instead of creating a new one
-        let relay = self.shared_relay.as_ref()
+        let relay = self
+            .shared_relay
+            .as_ref()
             .ok_or("Shared relay not initialized")?
             .clone();
-        
+
         let vpn_client = self.vpn_client.clone();
         let server_mode = self.config.server_mode;
         let routes = self.routes.clone();
@@ -331,12 +332,11 @@ impl SwarmController {
                 // Task: Rx from Channel -> Relay (Outbound from TUN)
                 let _outbound_task = tokio::spawn(async move {
                     while let Some(msg) = client_rx.recv().await {
-                        let msg_len =
-                            if let TunnelMessage::IpPacket { payload } = &msg {
-                                payload.len()
-                            } else {
-                                0
-                            };
+                        let msg_len = if let TunnelMessage::IpPacket { payload } = &msg {
+                            payload.len()
+                        } else {
+                            0
+                        };
 
                         if let Err(e) = relay_send.send(&msg).await {
                             warn!("Failed to send to relay: {}", e);
@@ -344,10 +344,7 @@ impl SwarmController {
                         }
 
                         if msg_len > 0 {
-                            entropy_tax_send
-                                .lock()
-                                .await
-                                .earn_tokens(msg_len as u64);
+                            entropy_tax_send.lock().await.earn_tokens(msg_len as u64);
                         }
                     }
                 });
@@ -371,10 +368,7 @@ impl SwarmController {
                                         {
                                             let mut r = routes.write().await;
                                             r.entry(src_ip).or_insert_with(|| {
-                                                info!(
-                                                    "🆕 Learned route: {} -> Client",
-                                                    src_ip
-                                                );
+                                                info!("🆕 Learned route: {} -> Client", src_ip);
                                                 client_tx.clone()
                                             });
                                         }
@@ -382,11 +376,7 @@ impl SwarmController {
 
                                     // 2. Inject into TUN
                                     let payload_len = payload.len();
-                                    client
-                                        .lock()
-                                        .await
-                                        .inject_packet(payload.to_vec())
-                                        .await;
+                                    client.lock().await.inject_packet(payload.to_vec()).await;
 
                                     // 3. Earn tokens
                                     entropy_tax_handler
@@ -395,10 +385,7 @@ impl SwarmController {
                                         .earn_tokens(payload_len as u64);
                                 }
                                 _ => {
-                                    debug!(
-                                        "Exit Service received non-IP message: {:?}",
-                                        msg
-                                    );
+                                    debug!("Exit Service received non-IP message: {:?}", msg);
                                 }
                             }
                         }
@@ -427,7 +414,6 @@ impl SwarmController {
 
             warn!("Exit Service stopped");
         });
-
 
         // Spawn Outbound Router (TUN -> Clients)
         // Only one router needed for all clients

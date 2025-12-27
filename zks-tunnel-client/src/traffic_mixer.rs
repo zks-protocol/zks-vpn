@@ -29,7 +29,11 @@ pub enum TrafficPacket {
     RelayTraffic { peer_id: String, data: Bytes },
 
     /// Exit traffic (decrypted and forwarded to internet)
-    ExitTraffic { target: String, session_id: String, data: Bytes },
+    ExitTraffic {
+        target: String,
+        session_id: String,
+        data: Bytes,
+    },
 
     /// Dummy padding packet for constant-rate padding
     Padding { size: usize },
@@ -174,7 +178,11 @@ impl TrafficMixer {
                     data.len()
                 );
             }
-            TrafficPacket::ExitTraffic { target, session_id, data } => {
+            TrafficPacket::ExitTraffic {
+                target,
+                session_id,
+                data,
+            } => {
                 debug!(
                     "[{}] Forwarding exit packet to {} for session {} ({} bytes)",
                     source,

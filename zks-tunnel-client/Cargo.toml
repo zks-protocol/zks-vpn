@@ -63,6 +63,7 @@ ml-kem = { version = "0.2", optional = true }
 indicatif = "0.18.3"
 blake3 = "1.8.2"
 rand = "0.8"
+pnet_packet = "0.35"
 
 # Security: Constant-time operations and key zeroization
 subtle = "2.6"

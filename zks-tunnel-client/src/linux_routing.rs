@@ -103,13 +103,13 @@ pub async fn delete_default_route(gateway: Ipv4Addr) -> Result<()> {
 #[cfg(target_os = "linux")]
 pub fn get_default_interface() -> Option<String> {
     use std::process::Command;
-    
+
     // Run: ip route show default
     let output = Command::new("ip")
         .args(["route", "show", "default"])
         .output()
         .ok()?;
-    
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Example output: "default via 192.168.0.1 dev eth0 proto dhcp metric 100"
     // We want to extract the interface name after "dev "
@@ -126,7 +126,7 @@ pub fn get_default_interface() -> Option<String> {
             }
         }
     }
-    
+
     None
 }
 
@@ -135,11 +135,12 @@ pub fn get_default_interface() -> Option<String> {
 #[cfg(target_os = "linux")]
 pub fn enable_nat_masquerade(vpn_subnet: &str, wan_interface: &str) -> Result<()> {
     use std::process::Command;
-    
+
     // First, enable IP forwarding
     match Command::new("sysctl")
         .args(["-w", "net.ipv4.ip_forward=1"])
-        .output() {
+        .output()
+    {
         Ok(output) if output.status.success() => {
             info!("✅ IP forwarding enabled");
         }
@@ -151,24 +152,52 @@ pub fn enable_nat_masquerade(vpn_subnet: &str, wan_interface: &str) -> Result<()
             tracing::warn!("⚠️ Could not run sysctl: {}", e);
         }
     }
-    
+
     // Check if rule already exists to avoid duplicates
     let check = Command::new("iptables")
-        .args(["-t", "nat", "-C", "POSTROUTING", "-s", vpn_subnet, "-o", wan_interface, "-j", "MASQUERADE"])
+        .args([
+            "-t",
+            "nat",
+            "-C",
+            "POSTROUTING",
+            "-s",
+            vpn_subnet,
+            "-o",
+            wan_interface,
+            "-j",
+            "MASQUERADE",
+        ])
         .output();
-    
+
     if check.map(|o| o.status.success()).unwrap_or(false) {
-        info!("✅ NAT MASQUERADE already configured for {} -> {}", vpn_subnet, wan_interface);
+        info!(
+            "✅ NAT MASQUERADE already configured for {} -> {}",
+            vpn_subnet, wan_interface
+        );
         return Ok(());
     }
-    
+
     // Add MASQUERADE rule: traffic from VPN subnet going out WAN interface gets NAT'd
     let output = Command::new("iptables")
-        .args(["-t", "nat", "-A", "POSTROUTING", "-s", vpn_subnet, "-o", wan_interface, "-j", "MASQUERADE"])
+        .args([
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-s",
+            vpn_subnet,
+            "-o",
+            wan_interface,
+            "-j",
+            "MASQUERADE",
+        ])
         .output()?;
-    
+
     if output.status.success() {
-        info!("✅ NAT MASQUERADE enabled: {} -> {} (TCP/ICMP forwarding ready)", vpn_subnet, wan_interface);
+        info!(
+            "✅ NAT MASQUERADE enabled: {} -> {} (TCP/ICMP forwarding ready)",
+            vpn_subnet, wan_interface
+        );
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
