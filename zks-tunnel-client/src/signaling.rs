@@ -47,6 +47,13 @@ pub enum SignalingRequest {
     },
     /// Request hole-punch coordination
     HolePunch { target_peer_id: String },
+    /// DCUtR: Exchange observed addresses for hole-punch
+    DcutrConnect {
+        target_peer_id: String,
+        observed_addrs: Vec<String>,
+    },
+    /// DCUtR: Synchronize hole-punch attempt timing
+    DcutrSync { to_peer: String },
 }
 
 /// Messages received from signaling server
@@ -73,6 +80,13 @@ pub enum SignalingResponse {
     },
     /// Error message
     Error { message: String },
+    /// DCUtR: Incoming connection request with observed addresses
+    DcutrConnect {
+        from_peer: String,
+        observed_addrs: Vec<String>,
+    },
+    /// DCUtR: Synchronize hole-punch attempt
+    DcutrSync { from_peer: String },
 }
 
 /// WebSocket signaling client

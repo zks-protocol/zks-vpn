@@ -50,6 +50,13 @@ enum ClientMessage {
     Entropy { entropy: String },
     /// Request hole-punch coordination
     HolePunch { target_peer_id: String },
+    /// DCUtR: Exchange observed addresses for hole-punch
+    DcutrConnect {
+        target_peer_id: String,
+        observed_addrs: Vec<String>,
+    },
+    /// DCUtR: Synchronize hole-punch attempt timing
+    DcutrSync { to_peer: String },
     /// Simple ping
     Ping,
 }
@@ -89,6 +96,13 @@ enum ServerEvent {
     LegacyPeerLeave { peer_id: String, role: String },
     #[serde(rename = "pong")]
     Pong,
+    /// DCUtR: Incoming connection request with observed addresses
+    DcutrConnect {
+        from_peer: String,
+        observed_addrs: Vec<String>,
+    },
+    /// DCUtR: Synchronize hole-punch attempt
+    DcutrSync { from_peer: String },
 }
 
 /// Peer info for Swarm mode
@@ -221,8 +235,14 @@ impl DurableObject for VpnRoom {
 
         match message {
             WebSocketIncomingMessage::Binary(data) => {
-                // Relay binary ZKS-encrypted data to the OTHER peer only
-                self.relay_to_peer(&data, &session);
+                // SIGNALING-ONLY: Binary relay is disabled
+                // VPN traffic should flow via direct P2P (DCUtR), not through this relay
+                console_log!(
+                    "[VpnRoom] ⚠️ SIGNALING-ONLY: Received {} byte binary from {:?} - NOT relaying. Use DCUtR for VPN traffic.",
+                    data.len(),
+                    session.role
+                );
+                // Do NOT relay binary data - clients must use DCUtR direct P2P
             }
             WebSocketIncomingMessage::String(text) => {
                 // Try to parse as ClientMessage
@@ -319,6 +339,44 @@ impl DurableObject for VpnRoom {
                             let pong =
                                 serde_json::to_string(&ServerEvent::Pong).unwrap_or_default();
                             let _ = ws.send_with_str(&pong);
+                        }
+
+                        ClientMessage::DcutrConnect {
+                            target_peer_id,
+                            observed_addrs,
+                        } => {
+                            // DCUtR: Forward observed addresses to target peer for hole-punch
+                            console_log!(
+                                "[VpnRoom] 🔗 DCUtR Connect: {} -> {} with {} addrs",
+                                session.peer_id,
+                                target_peer_id,
+                                observed_addrs.len()
+                            );
+
+                            // Find target peer's WebSocket and send them our addresses
+                            let dcutr_msg = serde_json::to_string(&ServerEvent::DcutrConnect {
+                                from_peer: session.peer_id.clone(),
+                                observed_addrs,
+                            })
+                            .unwrap_or_default();
+
+                            self.send_to_peer(&target_peer_id, &dcutr_msg);
+                        }
+
+                        ClientMessage::DcutrSync { to_peer } => {
+                            // DCUtR: Synchronize hole-punch timing between peers
+                            console_log!(
+                                "[VpnRoom] ⏱️ DCUtR Sync: {} -> {}",
+                                session.peer_id,
+                                to_peer
+                            );
+
+                            let sync_msg = serde_json::to_string(&ServerEvent::DcutrSync {
+                                from_peer: session.peer_id.clone(),
+                            })
+                            .unwrap_or_default();
+
+                            self.send_to_peer(&to_peer, &sync_msg);
                         }
                     }
                 } else if text == "ping" || text == "{\"type\":\"ping\"}" {
@@ -441,6 +499,27 @@ impl VpnRoom {
                 }
             }
         }
+    }
+
+    /// Send message to a specific peer by ID (for DCUtR coordination)
+    fn send_to_peer(&self, target_peer_id: &str, text: &str) {
+        for ws in self.state.get_websockets() {
+            if let Ok(Some(session)) = ws.deserialize_attachment::<PeerSession>() {
+                if session.peer_id == target_peer_id {
+                    if let Err(e) = ws.send_with_str(text) {
+                        console_error!(
+                            "[VpnRoom] Failed to send to peer {}: {:?}",
+                            target_peer_id,
+                            e
+                        );
+                    } else {
+                        console_log!("[VpnRoom] ✅ Sent message to peer {}", target_peer_id);
+                    }
+                    return;
+                }
+            }
+        }
+        console_log!("[VpnRoom] ⚠️ Peer {} not found", target_peer_id);
     }
 
     /// Relay binary data to the OTHER peer (VPN mode: point-to-point)

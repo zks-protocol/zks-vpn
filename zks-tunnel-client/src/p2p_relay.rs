@@ -577,13 +577,17 @@ pub struct P2PRelay {
     pub room_id: String,
     /// Shared secret for file transfer
     pub shared_secret: [u8; 32],
-    /// Our Peer ID assigned by relay
-    /// Our Peer ID assigned by relay
+    /// Our Peer ID assigned by relay  
     pub peer_id: String,
     /// Key Exchange state
     pub key_exchange: Arc<Mutex<KeyExchange>>,
     /// Key exchange completion flag (set to true after both parties have completed exchange)
     pub key_exchange_complete: Arc<AtomicBool>,
+    /// Remote peer's libp2p PeerID and addresses (for DCUtR hole-punching)
+    /// Format: (peer_id_string, Vec<multiaddr_strings>)
+    pub remote_peer_info: Arc<Mutex<Option<(String, Vec<String>)>>>,
+    /// Direct P2P data stream (DCUtR) - if set, data will be sent here instead of WebSocket
+    pub data_stream: Arc<Mutex<Option<libp2p::Stream>>>,
 }
 
 #[allow(dead_code)]
@@ -766,6 +770,8 @@ impl P2PRelay {
             peer_id: my_peer_id.clone(),
             key_exchange: key_exchange.clone(),
             key_exchange_complete: Arc::new(AtomicBool::new(false)),
+            remote_peer_info: Arc::new(Mutex::new(None)),
+            data_stream: Arc::new(Mutex::new(None)),
         };
         let relay_arc = Arc::new(relay);
 
@@ -778,16 +784,20 @@ impl P2PRelay {
                 // For Swarm mode, add a small random delay to avoid collisions
                 if role == PeerRole::Swarm {
                     let delay = (my_peer_id_clone.chars().last().unwrap_or('0') as u64 % 10) * 100;
+                    info!("🔑 Swarm handshake delay: {}ms (peer: {})", delay, my_peer_id_clone);
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
 
                 // Send AuthInit
+                info!("🔑 Initiating key exchange (sending AuthInit)...");
                 if let Ok(auth_init) = relay_clone.key_exchange.lock().await.create_auth_init() {
                     if let Err(e) = relay_clone.send_text(auth_init.to_json()).await {
-                        warn!("Failed to send AuthInit: {}", e);
+                        warn!("❌ Failed to send AuthInit: {}", e);
                     } else {
-                        debug!("Sent AuthInit message");
+                        info!("✅ Sent AuthInit message - waiting for peer response");
                     }
+                } else {
+                    warn!("❌ Failed to create AuthInit message");
                 }
             });
         }
@@ -833,6 +843,23 @@ impl P2PRelay {
         }
         */
 
+        // Start WebSocket keepalive ping task (prevents Cloudflare idle timeout)
+        {
+            let writer_clone = writer.clone();
+            tokio::spawn(async move {
+                let mut interval = interval(Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let mut w = writer_clone.lock().await;
+                    if let Err(e) = w.send(Message::Ping(vec![0x7A, 0x6B, 0x73])).await {
+                        debug!("Keepalive ping failed: {} (connection may be closed)", e);
+                        break;
+                    }
+                    debug!("🏓 Sent keepalive ping");
+                }
+            });
+        }
+
         info!("✅ Connected to relay with ID: {}", my_peer_id);
         Ok(relay_arc)
     }
@@ -860,7 +887,68 @@ impl P2PRelay {
         }
     }
 
-    /// Send ZKS-encrypted message through relay
+    /// Send our PeerInfo to the remote peer for DCUtR hole-punching
+    /// Call this after key exchange is complete
+    pub async fn send_peer_info(
+        &self,
+        peer_id: String,
+        addrs: Vec<String>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use crate::key_exchange::KeyExchangeMessage;
+        
+        info!("📤 Sending PeerInfo for DCUtR hole-punch:");
+        info!("   Our Peer ID: {}", peer_id);
+        info!("   Our Addresses: {:?}", addrs);
+        
+        let peer_info_msg = KeyExchangeMessage::PeerInfo { peer_id, addrs };
+        self.send_text(peer_info_msg.to_json()).await?;
+        
+        info!("✅ PeerInfo sent to remote peer");
+        Ok(())
+    }
+    
+    /// Get the received remote peer info for DCUtR (if available)
+    /// Returns (peer_id, Vec<multiaddr>) or None if not received yet
+    pub async fn get_remote_peer_info(&self) -> Option<(String, Vec<String>)> {
+        self.remote_peer_info.lock().await.clone()
+    }
+    
+    /// Wait for remote peer info with timeout
+    pub async fn wait_for_peer_info(
+        &self,
+        timeout_secs: u64,
+    ) -> Option<(String, Vec<String>)> {
+        use tokio::time::{timeout, Duration};
+        
+        info!("⏳ Waiting for remote PeerInfo ({} secs)...", timeout_secs);
+        
+        let result = timeout(Duration::from_secs(timeout_secs), async {
+            loop {
+                if let Some(info) = self.get_remote_peer_info().await {
+                    return info;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        
+        match result {
+            Ok(info) => {
+                info!("✅ Received remote PeerInfo");
+                Some(info)
+            }
+            Err(_) => {
+                warn!("⚠️ Timeout waiting for remote PeerInfo");
+                None
+            }
+        }
+    }
+
+    /// Send ZKS-encrypted message through DIRECT P2P connection (DCUtR required)
+    /// 
+    /// SIGNALING-ONLY ARCHITECTURE: The relay worker is used ONLY for signaling.
+    /// All VPN traffic MUST go through direct P2P DCUtR connections.
+    /// If no direct connection is available, this function returns an error.
     pub async fn send(
         &self,
         message: &TunnelMessage,
@@ -873,27 +961,50 @@ impl P2PRelay {
             keys.encrypt(&encoded).map_err(|_| "Encryption failed")?
         };
 
-        // Send as binary
-        let mut writer = self.writer.lock().await;
-        writer.send(Message::Binary(encrypted)).await?;
+        // REQUIRE DIRECT P2P STREAM (DCUtR)
+        // Relay is signaling-only - no WebSocket binary fallback!
+        let mut stream_guard = self.data_stream.lock().await;
+        if let Some(stream) = stream_guard.as_mut() {
+            use libp2p::futures::AsyncWriteExt;
+            
+            // Send length-prefixed packet
+            let len = encrypted.len() as u32;
+            let len_bytes = len.to_be_bytes();
+            
+            // Write length
+            stream.write_all(&len_bytes).await.map_err(|e| {
+                format!("DCUtR write length failed: {}", e)
+            })?;
+            
+            // Write payload
+            stream.write_all(&encrypted).await.map_err(|e| {
+                format!("DCUtR write payload failed: {}", e)
+            })?;
+            
+            // Flush
+            stream.flush().await.map_err(|e| {
+                format!("DCUtR flush failed: {}", e)
+            })?;
+            
+            return Ok(());
+        }
+        drop(stream_guard);
 
-        Ok(())
+        // NO FALLBACK: DCUtR is required for VPN traffic
+        // The relay worker is signaling-only and does not relay binary data
+        Err("❌ No direct P2P connection available. DCUtR hole-punch required for VPN traffic. Relay is signaling-only.".into())
     }
 
-    /// Send raw encrypted bytes
+    /// Send raw encrypted bytes - DEPRECATED
+    /// 
+    /// This function is deprecated in the signaling-only architecture.
+    /// Use the `send()` function which requires a DCUtR direct connection.
+    #[deprecated(note = "WebSocket binary relay disabled. Use send() with DCUtR instead.")]
     pub async fn send_raw(
         &self,
-        data: &[u8],
+        _data: &[u8],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let encrypted = {
-            let keys = self.keys.lock().await;
-            keys.encrypt(data).map_err(|_| "Encryption failed")?
-        };
-
-        let mut writer = self.writer.lock().await;
-        writer.send(Message::Binary(encrypted)).await?;
-
-        Ok(())
+        Err("❌ send_raw() is deprecated. Relay is signaling-only. Use DCUtR for data transfer.".into())
     }
 
     /// Send raw text message (for control/entropy events)
@@ -936,9 +1047,14 @@ impl P2PRelay {
         let mut reader = self.reader.lock().await;
 
         while let Some(msg) = reader.next().await {
+            let recv_start = std::time::Instant::now();
+            
             match msg? {
                 Message::Binary(data) => {
+                    let data_len = data.len();
+                    
                     // Decrypt with Wasif Vernam (ChaCha20-Poly1305)
+                    let decrypt_start = std::time::Instant::now();
                     let decrypted = {
                         let keys = self.keys.lock().await;
                         match keys.decrypt(&data) {
@@ -951,21 +1067,43 @@ impl P2PRelay {
                             }
                         }
                     };
+                    let decrypt_time = decrypt_start.elapsed();
 
                     // Decode protocol message
+                    let decode_start = std::time::Instant::now();
                     match TunnelMessage::decode(&decrypted) {
-                        Ok(msg) => return Ok(Some(msg)),
+                        Ok(msg) => {
+                            let decode_time = decode_start.elapsed();
+                            let total = recv_start.elapsed();
+                            
+                            // Log timing if total > 10ms (indicates bottleneck)
+                            if total.as_millis() > 10 {
+                                info!(
+                                    "📥 RELAY RECV: decrypt={:?} decode={:?} total={:?} ({} bytes)",
+                                    decrypt_time, decode_time, total, data_len
+                                );
+                            }
+                            
+                            return Ok(Some(msg));
+                        }
                         Err(e) => {
                             warn!("Failed to decode message: {}", e);
                         }
                     }
                 }
                 Message::Text(text) => {
-                    debug!("Received control message: {}", text);
+                    info!("📨 Received TEXT message: {} chars", text.len());
+                    
+                    // Log first 200 chars for debugging
+                    if text.len() > 200 {
+                        debug!("Text content: {}...", &text[..200]);
+                    } else {
+                        debug!("Text content: {}", text);
+                    }
 
                     // Handle Peer Join
                     if text.contains("\"peer_join\"") || text.contains("\"PeerJoin\"") {
-                        info!("👤 Peer joined room");
+                        info!("👤 Peer joined room - initiating handshake");
                         if self.role == PeerRole::Swarm || self.role == PeerRole::Client {
                             // Initiate handshake
                             let auth_init = self
@@ -975,14 +1113,16 @@ impl P2PRelay {
                                 .create_auth_init()
                                 .map_err(|e| format!("Failed to create AuthInit: {}", e))?;
                             self.send_text(auth_init.to_json()).await?;
-                            debug!("Sent AuthInit to new peer");
+                            info!("🔑 Sent AuthInit to new peer");
                         }
                     }
 
                     // Handle Key Exchange Messages
                     if let Some(ke_msg) = KeyExchangeMessage::from_json(&text) {
+                        info!("🔐 Received KeyExchange message type: {:?}", std::mem::discriminant(&ke_msg));
                         match ke_msg {
                             KeyExchangeMessage::AuthInit { .. } => {
+                                info!("🔑 Processing AuthInit from peer...");
                                 // Respond with AuthResponse
                                 let result = {
                                     let mut ke = self.key_exchange.lock().await;
@@ -998,7 +1138,7 @@ impl P2PRelay {
                                         };
 
                                         self.send_text(auth_response.to_json()).await?;
-                                        debug!("Sent AuthResponse");
+                                        info!("✅ Sent AuthResponse to peer");
 
                                         // Update keys
                                         {
@@ -1034,6 +1174,7 @@ impl P2PRelay {
                                 }
                             }
                             KeyExchangeMessage::AuthResponse { .. } => {
+                                info!("🔑 Processing AuthResponse from peer...");
                                 // Finalize handshake
                                 let result = {
                                     let mut ke = self.key_exchange.lock().await;
@@ -1059,6 +1200,7 @@ impl P2PRelay {
 
                                         // Send KeyConfirm
                                         self.send_text(key_confirm.to_json()).await?;
+                                        info!("✅ Sent KeyConfirm - handshake complete!");
                                     }
                                     Err(e) if e.starts_with("Ignored:") => {
                                         debug!("⚠️ {}", e);
@@ -1084,6 +1226,18 @@ impl P2PRelay {
                                     // Mark key exchange as complete (final confirmation)
                                     self.key_exchange_complete.store(true, Ordering::SeqCst);
                                 }
+                            }
+                            // Handle PeerInfo for DCUtR hole-punching
+                            KeyExchangeMessage::PeerInfo { peer_id, addrs } => {
+                                info!("📍 Received PeerInfo for DCUtR hole-punch:");
+                                info!("   Peer ID: {}", peer_id);
+                                info!("   Addresses: {:?}", addrs);
+                                
+                                // Store peer info for DCUtR connection attempt
+                                let mut peer_info = self.remote_peer_info.lock().await;
+                                *peer_info = Some((peer_id.clone(), addrs.clone()));
+                                
+                                info!("✅ Stored peer info for DCUtR - ready for direct connection");
                             }
                             _ => {}
                         }
