@@ -178,6 +178,10 @@ impl TrueVernamFetcher {
     ///
     /// Security: Even if worker is compromised, local + swarm entropy protects you.
     /// Even if your device is compromised, worker + swarm entropy protects you.
+    /// 
+    /// OPTIMIZATION: When swarm_seed is set (trustless mode), we skip Worker calls
+    /// entirely to save API costs. Local CSPRNG + swarm is already cryptographically
+    /// secure and completely trustless.
     async fn fetch_hybrid_entropy(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use sha2::{Digest, Sha256};
 
@@ -185,17 +189,28 @@ impl TrueVernamFetcher {
         let mut local_entropy = [0u8; 32];
         getrandom::getrandom(&mut local_entropy).unwrap_or_default();
 
-        // 2. Worker entropy (Cloudflare's hardware RNG + LavaRand)
-        let worker_entropy = self.fetch_worker_entropy().await.unwrap_or_else(|e| {
-            warn!(
-                "Worker entropy fetch failed: {}, using additional local randomness",
-                e
-            );
-            // Fallback: generate MORE local entropy (not zeros!)
-            let mut fallback = [0u8; 32];
-            getrandom::getrandom(&mut fallback).unwrap_or_default();
-            fallback.to_vec()
-        });
+        // 2. Worker entropy - SKIP if swarm_seed is set (already trustless!)
+        // This saves Cloudflare Worker API costs when running in swarm mode.
+        let worker_entropy = if self.swarm_seed.is_some() {
+            // SWARM MODE: Use additional local entropy instead of Worker
+            // Security is maintained: local CSPRNG + swarm_seed = fully trustless
+            debug!("🚀 Swarm mode: skipping Worker entropy (cost optimization)");
+            let mut extra_local = [0u8; 32];
+            getrandom::getrandom(&mut extra_local).unwrap_or_default();
+            extra_local.to_vec()
+        } else {
+            // NON-SWARM MODE: Fetch from Cloudflare Worker (needs external trust)
+            self.fetch_worker_entropy().await.unwrap_or_else(|e| {
+                warn!(
+                    "Worker entropy fetch failed: {}, using additional local randomness",
+                    e
+                );
+                // Fallback: generate MORE local entropy (not zeros!)
+                let mut fallback = [0u8; 32];
+                getrandom::getrandom(&mut fallback).unwrap_or_default();
+                fallback.to_vec()
+            })
+        };
 
         // 3. Combine all entropy sources using SHA256
         let mut hasher = Sha256::new();
@@ -203,15 +218,15 @@ impl TrueVernamFetcher {
         // Add local entropy (you trust your device)
         hasher.update(local_entropy);
 
-        // Add worker entropy (trust Cloudflare OR swarm overrides)
+        // Add worker/extra-local entropy
         hasher.update(worker_entropy);
 
         // Add swarm seed if available (TRUSTLESS - even if worker is evil)
         // Note: This seed is mixed into every batch. Even if it doesn't change often,
-        // the Local/Worker entropy changes every 100ms, ensuring the output is always unique.
+        // the Local entropy changes every call, ensuring the output is always unique.
         if let Some(swarm_seed) = &self.swarm_seed {
             hasher.update(swarm_seed);
-            debug!("🔗 Hybrid entropy: local + worker + swarm (TRUSTLESS)");
+            debug!("🔗 Hybrid entropy: local + local2 + swarm (TRUSTLESS, no Worker cost)");
         } else {
             debug!("⚠️ Hybrid entropy: local + worker only (trust Cloudflare)");
         }
@@ -308,8 +323,8 @@ mod tests {
         buffer.push_entropy(&[0xAB; 100]);
 
         // Consume in chunks
-        let chunk1 = buffer.consume(50).unwrap();
-        let chunk2 = buffer.consume(50).unwrap();
+        let _chunk1 = buffer.consume(50).unwrap();
+        let _chunk2 = buffer.consume(50).unwrap();
 
         // Each consumption reduces the buffer
         assert_eq!(buffer.available(), 0);

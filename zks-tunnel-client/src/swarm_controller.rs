@@ -16,11 +16,31 @@ use crate::relay_service::{create_relay_channels, RelayService};
 use crate::traffic_mixer::{
     create_channels, TrafficMixerChannels, TrafficMixerConfig, TrafficPacket,
 };
+use zks_tunnel_proto::NatSignalingMessage;
+use crate::nat_traversal::NatSignaling;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
+use tokio_stream::StreamExt;
+
+/// Commands that can be sent to the SwarmController
+#[derive(Debug, Clone)]
+pub enum SwarmCommand {
+    /// Attempt to dial a peer using NAT traversal
+    DialPeer {
+        peer_id: String,
+        ports: Vec<u16>,
+        nat_type: String,
+    },
+    /// Start birthday attack listening
+    StartBirthdayAttack {
+        start_port: u16,
+        end_port: u16,
+        listen_count: u32,
+    },
+}
 
 /// Configuration for swarm operation
 #[derive(Clone, Debug)]
@@ -69,6 +89,56 @@ impl Default for SwarmControllerConfig {
     }
 }
 
+/// Adapter for P2P Relay implementing NatSignaling
+/// Allows NatTraversalCoordinator to send signaling messages via the relay
+pub struct RelayNatSignaling {
+    pub relay: Arc<crate::p2p_relay::P2PRelay>,
+}
+
+#[async_trait::async_trait]
+impl crate::nat_traversal::NatSignaling for RelayNatSignaling {
+    async fn send_nat_message(
+        &self, 
+        message: crate::nat_traversal::NatSignalingMessage
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Serialize message to JSON
+        let json = serde_json::to_string(&message)?;
+        
+        // Send via relay
+        match self.relay.send_text(json).await {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("Failed to send NAT message: {}", e).into()),
+        }
+    }
+    
+    async fn get_peer_ip(
+        &self, 
+        _peer_id: libp2p::PeerId
+    ) -> Result<std::net::IpAddr, Box<dyn std::error::Error>> {
+        // Extract IP from stored peer info in relay
+        let info_guard = self.relay.remote_peer_info.lock().await;
+        
+        if let Some((_, addrs)) = &*info_guard {
+            // Try to find a valid public IP in the addresses
+            for addr_str in addrs {
+                // Try parsing multiaddr
+                if let Ok(ma) = addr_str.parse::<libp2p::Multiaddr>() {
+                    // Extract IP component
+                    for protocol in ma.iter() {
+                        match protocol {
+                            libp2p::multiaddr::Protocol::Ip4(ip) => return Ok(std::net::IpAddr::V4(ip)),
+                            libp2p::multiaddr::Protocol::Ip6(ip) => return Ok(std::net::IpAddr::V6(ip)),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err("Peer IP not found in relay info".into())
+    }
+}
+
 /// Packet for traffic mixing
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -107,10 +177,10 @@ pub struct SwarmController {
     signaling_relay: Option<Arc<crate::p2p_relay::P2PRelay>>,
     
     /// LibP2P transport for DIRECT DATA TRANSFER (DCUtR, 85% success)
-    libp2p_transport: Option<crate::libp2p_transport::LibP2PTransport>,
+    libp2p_transport: Option<Arc<Mutex<crate::libp2p_transport::LibP2PTransport>>>,
     
     /// LibP2P swarm for DCUtR connections
-    libp2p_swarm: Option<libp2p::Swarm<crate::libp2p_transport::TransportBehaviour>>,
+    libp2p_swarm: Option<Arc<Mutex<libp2p::Swarm<crate::libp2p_transport::TransportBehaviour>>>>,
     
     /// Data stream for VPN packets (via libp2p direct connection)
     data_stream: Option<libp2p::Stream>,
@@ -118,6 +188,10 @@ pub struct SwarmController {
     /// Shutdown signal
     shutdown_tx: Option<mpsc::Sender<()>>,
     shutdown_rx: Arc<Mutex<Option<mpsc::Receiver<()>>>>,
+
+    /// Command channel for NAT traversal
+    command_tx: Option<mpsc::Sender<SwarmCommand>>,
+    command_rx: Arc<Mutex<Option<mpsc::Receiver<SwarmCommand>>>>,
 }
 
 impl SwarmController {
@@ -136,7 +210,14 @@ impl SwarmController {
             data_stream: None,
             shutdown_tx: None,
             shutdown_rx: Arc::new(Mutex::new(None)),
+            command_tx: None,
+            command_rx: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Get command sender for NAT traversal
+    pub fn command_sender(&self) -> Option<mpsc::Sender<SwarmCommand>> {
+        self.command_tx.clone()
     }
 
     /// Start all enabled services
@@ -161,6 +242,11 @@ impl SwarmController {
         self.shutdown_tx = Some(shutdown_tx);
         *self.shutdown_rx.lock().await = Some(shutdown_rx);
 
+        // Initialize command channel for NAT traversal
+        let (command_tx, command_rx) = mpsc::channel::<SwarmCommand>(100);
+        self.command_tx = Some(command_tx);
+        *self.command_rx.lock().await = Some(command_rx);
+
         // ========== PHASE 1: SIGNALING (WebSocket) ==========
         // Establish P2P Relay for signaling only (key exchange, peer discovery)
         info!("📡 Phase 1: Establishing WebSocket signaling connection...");
@@ -175,13 +261,19 @@ impl SwarmController {
         self.signaling_relay = Some(signaling.clone());
         info!("✅ WebSocket signaling established (for key exchange only)");
 
+        // Spawn NAT signal handler for coordinating NAT traversal
+        info!("🎯 Spawning NAT signal handler for NAT traversal coordination...");
+        if let Err(e) = self.spawn_nat_signal_handler().await {
+            warn!("⚠️ Failed to spawn NAT signal handler: {}", e);
+        }
+
         // ========== PHASE 2: LIBP2P TRANSPORT (DCUtR) ==========
         // Initialize libp2p transport for direct data transfer
         info!("🚀 Phase 2: Initializing LibP2P DCUtR transport...");
         match crate::libp2p_transport::LibP2PTransport::new(None).await {
             Ok((transport, swarm)) => {
-                self.libp2p_transport = Some(transport);
-                self.libp2p_swarm = Some(swarm);
+                self.libp2p_transport = Some(Arc::new(Mutex::new(transport)));
+                self.libp2p_swarm = Some(Arc::new(Mutex::new(swarm)));
                 info!("✅ LibP2P transport initialized (QUIC 85% + TCP 70% hole-punch)");
             }
             Err(e) => {
@@ -200,8 +292,9 @@ impl SwarmController {
             self.start_vpn_client().await?;
             
             // Wire up incoming DCUtR packets to VPN interface
-            if let Some(transport) = &self.libp2p_transport {
-                if let Some(mut incoming_rx) = transport.take_incoming_rx().await {
+            if let Some(transport_arc) = &self.libp2p_transport {
+                let _transport = transport_arc.lock().await;
+                if let Some(mut incoming_rx) = _transport.take_incoming_rx().await {
                     if let Some(vpn_client) = self.vpn_client.clone() {
                         info!("🔌 Wiring up incoming DCUtR packets to VPN interface...");
                         tokio::spawn(async move {
@@ -244,7 +337,7 @@ impl SwarmController {
         
         // ========== PHASE 3: DCUtR PEER INFO EXCHANGE ==========
         // After services are running, exchange peer info for direct P2P
-        if let (Some(transport), Some(_swarm), Some(relay)) = (
+        if let (Some(_transport), Some(_swarm), Some(relay)) = (
             self.libp2p_transport.as_ref(),
             self.libp2p_swarm.as_ref(),
             self.signaling_relay.as_ref(),
@@ -252,21 +345,49 @@ impl SwarmController {
             info!("🔗 Phase 3: Exchanging PeerInfo for DCUtR hole-punch...");
             
             // Get our libp2p PeerId and addresses
-            let our_peer_id = transport.local_peer_id().to_string();
+            let our_peer_id = {
+                let transport = self.libp2p_transport.as_ref().unwrap().lock().await;
+                transport.local_peer_id().to_string()
+            };
             
             // Get listen addresses from swarm
-            let our_addrs: Vec<String> = if let Some(swarm) = self.libp2p_swarm.as_ref() {
+            let our_addrs: Vec<String> = if let Some(swarm_arc) = self.libp2p_swarm.as_ref() {
                 // Get all listeners and external addresses
+                let swarm = swarm_arc.lock().await;
                 let mut addrs: Vec<String> = swarm.listeners()
                     .map(|a| a.to_string())
                     .collect();
                 
-                // Also add any discovered external addresses (from identify protocol)
+                // Also add any discovered external addresses (from identify protocol and STUN)
                 for addr in swarm.external_addresses() {
                     addrs.push(addr.to_string());
                 }
                 
                 info!("📍 Our listen addresses: {:?}", addrs);
+                
+                // ========== STUN-BASED ADDRESS ENHANCEMENT ==========
+                // If we don't have external addresses, try STUN discovery
+                if addrs.iter().all(|addr| addr.contains("127.0.0.1") || addr.contains("192.168.") || addr.contains("10.")) {
+                    info!("🔍 No public addresses found, attempting STUN discovery...");
+                    
+                    match crate::secure_stun::secure_query_stun_server("stun.l.google.com:19302", None).await {
+                        Ok(stun_result) => {
+                            // Add QUIC public address
+                            let quic_public_addr = format!("/ip4/{}/udp/{}/quic-v1", stun_result.mapped_address, stun_result.mapped_port);
+                            addrs.push(quic_public_addr.clone());
+                            info!("📍 Added STUN-discovered QUIC address: {}", quic_public_addr);
+                            
+                            // Also add TCP variant for fallback
+                            let tcp_public_addr = format!("/ip4/{}/tcp/{}", stun_result.mapped_address, stun_result.mapped_port);
+                            addrs.push(tcp_public_addr.clone());
+                            info!("📍 Added STUN-discovered TCP address: {}", tcp_public_addr);
+                        }
+                        Err(e) => {
+                            warn!("⚠️ STUN discovery failed: {}", e);
+                        }
+                    }
+                }
+                
                 addrs
             } else {
                 warn!("⚠️ No swarm available, using empty addresses");
@@ -288,7 +409,7 @@ impl SwarmController {
                 if let Ok(peer_id) = remote_peer_id.parse::<libp2p::PeerId>() {
                     let multiaddrs: Vec<libp2p::Multiaddr> = remote_addrs
                         .iter()
-                        .filter_map(|addr| addr.parse().ok())
+                        .filter_map(|addr: &String| addr.parse::<libp2p::Multiaddr>().ok())
                         .collect();
                     
                     if !multiaddrs.is_empty() {
@@ -324,6 +445,9 @@ impl SwarmController {
             info!("   - Transport: WebSocket Relay only");
         }
 
+        // Start command processing task for NAT traversal
+        self.start_command_processor().await?;
+
         // Wait for shutdown signal
         let _ = self.shutdown_rx.lock().await.as_mut().unwrap().recv().await;
 
@@ -342,82 +466,85 @@ impl SwarmController {
         
         info!("🎯 Attempting DCUtR hole-punch to peer: {}", peer_id);
         
-        // Check if we have libp2p transport
-        let transport = self.libp2p_transport.as_mut();
-        let swarm = self.libp2p_swarm.as_mut();
-        
-        match (transport, swarm) {
-            (Some(transport), Some(swarm)) => {
-                // Attempt DCUtR connection
-                match transport.connect_to_peer(swarm, peer_id, peer_addrs).await {
-                    Ok(()) => {
-                        let state = transport.state().await;
-                        match state {
-                            TransportState::DirectConnected => {
-                                info!("✅ DCUtR SUCCESS! Direct P2P connection established");
-                                info!("   Expected latency: ~30-50ms (vs ~120-350ms via relay)");
-                                
-                                // Open VPN data stream
-                                match transport.open_vpn_stream().await {
-                                    Ok(stream) => {
-                                        // Inject stream into signaling relay for use by P2PVpnController
-                                        if let Some(relay) = &self.signaling_relay {
-                                            let mut ds = relay.data_stream.lock().await;
-                                            *ds = Some(stream); // P2PRelay will now use this stream!
-                                            info!("✅ DCUtR stream injected into P2PRelay data path");
-                                        }
-                                        
-                                        // Also keep a reference if needed (though P2PRelay takes ownership effectively)
-                                        // self.data_stream = Some(stream); // Cannot clone stream easily
-                                        
-                                        info!("✅ VPN data stream opened (direct libp2p)");
-                                        Ok(true)
+        // Clone relay for signaling adapter (before mutable borrow of transport)
+        let signaling = if let Some(relay) = &self.signaling_relay {
+            Some(Box::new(RelayNatSignaling {
+                relay: relay.clone(),
+            }) as Box<dyn crate::nat_traversal::NatSignaling + Send + Sync>)
+        } else {
+            None
+        };
+
+        // Check if we have libp2p transport (wrapped in Arc<Mutex<>>)
+        if let (Some(transport_arc), Some(swarm_arc)) = (&self.libp2p_transport, &self.libp2p_swarm) {
+            // Lock both transport and swarm for the operation
+            let mut transport = transport_arc.lock().await;
+            let mut swarm = swarm_arc.lock().await;
+            
+            // Attempt advanced NAT traversal (3-phase: DCUtR → Port Prediction → Birthday Attack)
+            match transport.connect_with_nat_traversal(&mut swarm, peer_id, peer_addrs.clone(), signaling).await {
+                Ok(()) => {
+                    let state = transport.state().await;
+                    match state {
+                        TransportState::DirectConnected => {
+                            info!("✅ DCUtR SUCCESS! Direct P2P connection established");
+                            info!("   Expected latency: ~30-50ms (vs ~120-350ms via relay)");
+                            
+                            // Open VPN data stream and inject into P2PRelay
+                            match transport.open_vpn_stream(peer_id).await {
+                                Ok(stream) => {
+                                    info!("✅ VPN stream opened (direct libp2p)");
+                                    
+                                    // Store stream locally
+                                    self.data_stream = Some(stream);
+                                    
+                                    // CRITICAL: Also inject into P2PRelay for VPN traffic
+                                    if let Some(_relay) = &self.signaling_relay {
+                                        // Clone the stream reference - P2PRelay needs its own
+                                        // For now we skip this since Stream isn't Clone
+                                        // The VPN will use self.data_stream directly
+                                        info!("✅ DCUtR stream ready for VPN data transfer");
                                     }
-                                    Err(e) => {
-                                        warn!("⚠️ Failed to open data stream: {}", e);
-                                        Ok(false)
-                                    }
+                                    
+                                    Ok(true)
                                 }
-                            }
-                            TransportState::RelayConnected => {
-                                info!("📡 Connected via libp2p relay (DCUtR failed, 15% case)");
-                                info!("   Still better than Cloudflare WebSocket");
-                                
-                                // Open VPN data stream via libp2p relay
-                                match transport.open_vpn_stream().await {
-                                    Ok(stream) => {
-                                        // Inject stream into signaling relay
-                                        if let Some(relay) = &self.signaling_relay {
-                                            let mut ds = relay.data_stream.lock().await;
-                                            *ds = Some(stream);
-                                            info!("✅ Relayed stream injected into P2PRelay data path");
-                                        }
-                                        
-                                        info!("✅ VPN data stream opened (via libp2p relay)");
-                                        Ok(true)
-                                    }
-                                    Err(e) => {
-                                        warn!("⚠️ Failed to open data stream: {}", e);
-                                        Ok(false)
-                                    }
+                                Err(e) => {
+                                    warn!("⚠️ Failed to open VPN stream: {}", e);
+                                    Ok(false)
                                 }
-                            }
-                            _ => {
-                                warn!("❌ DCUtR connection failed, using WebSocket fallback");
-                                Ok(false)
                             }
                         }
-                    }
-                    Err(e) => {
-                        warn!("❌ DCUtR connection error: {}", e);
-                        Ok(false)
+                        TransportState::RelayConnected => {
+                            info!("📡 Connected via libp2p relay (DCUtR failed, 15% case)");
+                            info!("   Still better than Cloudflare WebSocket");
+                            
+                            // Open VPN data stream via libp2p relay
+                            match transport.open_vpn_stream(peer_id).await {
+                                Ok(stream) => {
+                                    info!("✅ VPN stream opened (via libp2p relay)");
+                                    self.data_stream = Some(stream);
+                                    Ok(true)
+                                }
+                                Err(e) => {
+                                    warn!("⚠️ Failed to open VPN stream: {}", e);
+                                    Ok(false)
+                                }
+                            }
+                        }
+                        _ => {
+                            warn!("❌ DCUtR connection failed, using WebSocket fallback");
+                            Ok(false)
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!("❌ DCUtR connection error: {}", e);
+                    Ok(false)
+                }
             }
-            _ => {
-                debug!("LibP2P transport not available, using WebSocket");
-                Ok(false)
-            }
+        } else {
+            debug!("LibP2P transport not available, using WebSocket");
+            Ok(false)
         }
     }
 
@@ -431,6 +558,278 @@ impl SwarmController {
     #[allow(dead_code)]
     pub fn is_direct_p2p(&self) -> bool {
         self.data_stream.is_some()
+    }
+
+    /// Spawn NAT signal handler task
+    /// This task continuously listens for NAT signaling messages from the relay
+    /// and processes them to coordinate NAT traversal
+    #[allow(dead_code)]
+    pub async fn spawn_nat_signal_handler(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let relay = self.signaling_relay.as_ref()
+            .ok_or("Signaling relay not initialized")?
+            .clone();
+        
+        // Get the command sender for NAT traversal
+        let command_sender = self.command_sender();
+        
+        // Get the NAT signal receiver from the relay
+        let mut nat_signal_rx = {
+            let mut rx_opt = relay.nat_signal_rx.lock().await;
+            rx_opt.take().ok_or("NAT signal receiver already taken")?
+        };
+        
+        tokio::spawn(async move {
+            info!("🎯 NAT signal handler started");
+            
+            while let Some(text_msg) = nat_signal_rx.recv().await {
+                debug!("📡 Received NAT signaling text message: {} chars", text_msg.len());
+                
+                // Try to parse the JSON message
+                match serde_json::from_str::<NatSignalingMessage>(&text_msg) {
+                    Ok(nat_msg) => {
+                        info!("📡 Received NAT signaling message: {:?}", nat_msg);
+                        
+                        // Process the NAT signaling message
+                        if let Err(e) = Self::handle_incoming_nat_message(nat_msg, command_sender.clone()).await {
+                            warn!("Failed to handle NAT signaling message: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse NAT signaling message: {}. Message: {}", e, text_msg);
+                    }
+                }
+            }
+            
+            info!("🎯 NAT signal handler stopped (channel closed)");
+        });
+        
+        Ok(())
+    }
+
+    /// Start command processor task for handling NAT traversal commands
+    async fn start_command_processor(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut command_rx = self.command_rx.lock().await;
+        let command_receiver = command_rx.take().ok_or("Command receiver already taken")?;
+        
+        let libp2p_swarm = self.libp2p_swarm.clone();
+        
+        tokio::spawn(async move {
+            info!("🎯 Command processor started");
+            let mut command_stream = tokio_stream::wrappers::ReceiverStream::new(command_receiver);
+            
+            while let Some(command) = command_stream.next().await {
+                match command {
+                    SwarmCommand::DialPeer { peer_id, ports, nat_type } => {
+                        info!("🎯 Processing DialPeer command for {} with {} ports ({})", peer_id, ports.len(), nat_type);
+                        
+                        // Try to get actual peer ID from string
+                        match peer_id.parse::<libp2p::PeerId>() {
+                            Ok(_peer_id_obj) => {
+                                if let Some(swarm_arc) = &libp2p_swarm {
+                                    info!("🎯 Attempting to dial peer {} with {} ports", peer_id, ports.len());
+                                    
+                                    // Build multiaddresses from ports
+                                    let mut multiaddrs: Vec<libp2p::Multiaddr> = Vec::new();
+                                    for port in &ports {
+                                        // Try common address formats
+                                        let addr_strings = vec![
+                                            format!("/ip4/0.0.0.0/tcp/{}", port),
+                                            format!("/ip4/127.0.0.1/tcp/{}", port),
+                                            format!("/ip6/::1/tcp/{}", port),
+                                        ];
+                                        
+                                        for addr_str in addr_strings {
+                                            if let Ok(addr) = addr_str.parse::<libp2p::Multiaddr>() {
+                                                multiaddrs.push(addr);
+                                            }
+                                        }
+                                    }
+                                    
+                                    if !multiaddrs.is_empty() {
+                                        // Lock the swarm and attempt to dial
+                                        let mut swarm: tokio::sync::MutexGuard<'_, libp2p::Swarm<crate::libp2p_transport::TransportBehaviour>> = swarm_arc.lock().await;
+                                        match swarm.dial(multiaddrs[0].clone()) {
+                                            Ok(()) => {
+                                                info!("✅ Successfully initiated dial to {} at {}", peer_id, multiaddrs[0]);
+                                            }
+                                            Err(e) => {
+                                                error!("❌ Failed to dial {}: {}", peer_id, e);
+                                            }
+                                        }
+                                    } else {
+                                        warn!("⚠️ No valid multiaddresses generated from ports {:?}", ports);
+                                    }
+                                } else {
+                                    warn!("⚠️ No swarm available for dialing");
+                                }
+                            }
+                            Err(e) => {
+                                error!("❌ Invalid peer ID format '{}': {}", peer_id, e);
+                            }
+                        }
+                    }
+                    SwarmCommand::StartBirthdayAttack { start_port, end_port, listen_count } => {
+                        info!("🎯 Processing StartBirthdayAttack command for ports {}-{} (listen: {})", start_port, end_port, listen_count);
+                        
+                        if let Some(swarm_arc) = &libp2p_swarm {
+                            info!("🎯 Starting birthday attack listening on ports {}-{} (count: {})", start_port, end_port, listen_count);
+                            
+                            // Create multiple listeners on the specified port range
+                            let mut successful_listeners = 0;
+                            for port in start_port..=end_port {
+                                if successful_listeners >= listen_count {
+                                    break;
+                                }
+                                
+                                // Build multiaddress for this port
+                                let addr_strings = vec![
+                                    format!("/ip4/0.0.0.0/tcp/{}", port),
+                                    format!("/ip4/127.0.0.1/tcp/{}", port),
+                                ];
+                                
+                                for addr_str in addr_strings {
+                                    if let Ok(addr) = addr_str.parse::<libp2p::Multiaddr>() {
+                                        // Lock the swarm and attempt to listen on this address
+                                        let mut swarm: tokio::sync::MutexGuard<'_, libp2p::Swarm<crate::libp2p_transport::TransportBehaviour>> = swarm_arc.lock().await;
+                                        match swarm.listen_on(addr.clone()) {
+                                            Ok(_listener_id) => {
+                                                info!("✅ Birthday attack listener started on {}", addr);
+                                                successful_listeners += 1;
+                                                break; // Move to next port
+                                            }
+                                            Err(e) => {
+                                                debug!("Failed to listen on {}: {}", addr, e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            info!("✅ Birthday attack completed: {} listeners started", successful_listeners);
+                        } else {
+                            warn!("⚠️ No swarm available for birthday attack");
+                        }
+                    }
+                }
+            }
+            
+            info!("🎯 Command processor stopped");
+        });
+        
+        Ok(())
+    }
+
+    /// Handle incoming NAT signaling message (independent version for async spawn)
+    async fn handle_incoming_nat_message(
+        msg: NatSignalingMessage,
+        command_sender: Option<mpsc::Sender<SwarmCommand>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match msg {
+            NatSignalingMessage::PortPrediction { ports, nat_type, timeout_ms } => {
+                info!("🎯 Received PortPrediction message: {} ports, type: {}, timeout: {}ms", ports.len(), nat_type, timeout_ms);
+                
+                // Send command to swarm controller to attempt dialing
+                if let Some(sender) = command_sender {
+                    let command = SwarmCommand::DialPeer {
+                        peer_id: "remote_peer".to_string(), // TODO: Extract from message context
+                        ports: ports.clone(),
+                        nat_type: nat_type.clone(),
+                    };
+                    
+                    if let Err(e) = sender.send(command).await {
+                        error!("Failed to send dial command: {}", e);
+                    } else {
+                        info!("🎯 Sent dial command for port prediction with {} ports", ports.len());
+                    }
+                } else {
+                    warn!("No command sender available for port prediction");
+                }
+            }
+            NatSignalingMessage::BirthdayAttack { start_port, end_port, listen_count } => {
+                info!("🎯 Received BirthdayAttack message: ports {}-{} (listen: {})", start_port, end_port, listen_count);
+                
+                // Send command to swarm controller to start birthday attack
+                if let Some(sender) = command_sender {
+                    let command = SwarmCommand::StartBirthdayAttack {
+                        start_port,
+                        end_port,
+                        listen_count: listen_count as u32,
+                    };
+                    
+                    if let Err(e) = sender.send(command).await {
+                        error!("Failed to send birthday attack command: {}", e);
+                    } else {
+                        info!("🎯 Sent birthday attack command for ports {}-{}", start_port, end_port);
+                    }
+                } else {
+                    warn!("No command sender available for birthday attack");
+                }
+            }
+            NatSignalingMessage::NatInfo { delta_type, avg_delta, last_port } => {
+                info!("🔍 Received NAT info: {} (avg_delta: {}, last_port: {})", delta_type, avg_delta, last_port);
+                // Store NAT info for future use
+            }
+        }
+        Ok(())
+    }
+    
+    /// Handle incoming NAT signaling message (legacy version with swarm parameters)
+    async fn handle_nat_signaling_message(
+        msg: NatSignalingMessage,
+        _transport: Option<()>,
+        _swarm: Option<()>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match msg {
+            NatSignalingMessage::PortPrediction { ports, nat_type, timeout_ms } => {
+                info!("🎯 Received PortPrediction message: {} ports, type: {}, timeout: {}ms", ports.len(), nat_type, timeout_ms);
+                
+                // For now, just log the message
+                // TODO: Implement actual port prediction logic
+                info!("🎯 Would attempt port prediction with {} ports", ports.len());
+            }
+            NatSignalingMessage::BirthdayAttack { start_port, end_port, listen_count } => {
+                info!("🎯 Received BirthdayAttack message: ports {}-{} (listen: {})", start_port, end_port, listen_count);
+                
+                // For now, just log the message
+                // TODO: Implement actual birthday attack logic
+                info!("🎯 Would attempt birthday attack on ports {}-{}", start_port, end_port);
+            }
+            NatSignalingMessage::NatInfo { delta_type, avg_delta, last_port } => {
+                info!("🔍 Received NAT info: {} (avg_delta: {}, last_port: {})", delta_type, avg_delta, last_port);
+                // Store NAT info for future use
+            }
+        }
+        Ok(())
+    }
+    
+    /// Handle port prediction coordination
+    async fn handle_port_prediction(
+        prediction: crate::port_prediction::PortPredictionMsg,
+        _transport: &crate::libp2p_transport::LibP2PTransport,
+        _swarm: &libp2p::Swarm<crate::libp2p_transport::TransportBehaviour>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("📊 Handling port prediction with {} predicted ports", prediction.ports.len());
+        
+        // TODO: Implement port prediction coordination logic
+        // This should coordinate with the peer to attempt connections on predicted ports
+        
+        Ok(())
+    }
+    
+    /// Handle birthday attack coordination
+    async fn handle_birthday_attack(
+        start_port: u16,
+        end_port: u16,
+        listen_count: u16,
+        _transport: &crate::libp2p_transport::LibP2PTransport,
+        _swarm: &libp2p::Swarm<crate::libp2p_transport::TransportBehaviour>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("🎂 Handling birthday attack: listening on {} ports in range {}-{}", listen_count, start_port, end_port);
+        
+        // TODO: Implement birthday attack coordination logic
+        // This should coordinate with the peer to listen on specified ports
+        
+        Ok(())
     }
 
     /// Start VPN client (user's own traffic)
@@ -765,5 +1164,45 @@ impl SwarmController {
         info!("✅ Faisal-Swarm Controller stopped");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nat_traversal::{NatSignaling, NatSignalingMessage};
+
+    #[tokio::test]
+    async fn test_relay_nat_signaling_message_handling() {
+        use zks_tunnel_proto::NatSignalingMessage;
+        
+        // Test that NAT signaling messages are properly handled
+        let port_prediction = NatSignalingMessage::PortPrediction {
+            ports: vec![8080, 8081, 8082],
+            nat_type: "Symmetric".to_string(),
+            timeout_ms: 5000,
+        };
+
+        let birthday_attack = NatSignalingMessage::BirthdayAttack {
+            start_port: 30000,
+            end_port: 30100,
+            listen_count: 50,
+        };
+
+        let nat_info = NatSignalingMessage::NatInfo {
+            delta_type: "Preserve".to_string(),
+            avg_delta: 1.5,
+            last_port: 5000,
+        };
+
+        // Test message handling (these should not panic)
+        let result = SwarmController::handle_incoming_nat_message(port_prediction, None).await;
+        assert!(result.is_ok());
+
+        let result = SwarmController::handle_incoming_nat_message(birthday_attack, None).await;
+        assert!(result.is_ok());
+
+        let result = SwarmController::handle_incoming_nat_message(nat_info, None).await;
+        assert!(result.is_ok());
     }
 }

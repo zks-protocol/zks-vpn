@@ -1,0 +1,8 @@
+-server
+-Dfile.encoding=UTF-8
+-Djava.lang.Integer.IntegerCache.high=65535
+-Dkenvix.natpoked.debug=false
+-Dkotlinx.coroutines.debug=off
+-XX:+IgnoreUnrecognizedVMOptions
+-XX:+OmitStackTraceInFastThrow
+-XX:-HeapDumpOnOutOfMemoryError

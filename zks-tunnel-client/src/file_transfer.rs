@@ -243,7 +243,7 @@ pub async fn run_send_file(
     info!("Connected. Shared secret established.");
 
     // Use the first 32 bytes of the shared secret for encryption
-    let key = relay.shared_secret;
+    let key = *relay.shared_secret;
     let sender = FileSender::new(path.clone(), 1, &key);
 
     // Calculate hash for ticket
@@ -277,7 +277,7 @@ pub async fn run_send_file(
         id: 1,
     };
     let json = serde_json::to_string(&metadata)?;
-    relay.send_raw(json.as_bytes()).await?;
+    relay.send_text(json).await?;
     info!("Sent metadata for {}", filename);
 
     // Setup Progress Bar
@@ -326,7 +326,7 @@ pub async fn run_send_file(
             nonce,
         };
         let json = serde_json::to_string(&chunk)?;
-        relay.send_raw(json.as_bytes()).await?;
+        relay.send_text(json).await?;
 
         offset += chunk_size as u64;
         pb.set_position(offset);
@@ -336,7 +336,7 @@ pub async fn run_send_file(
     // Send complete
     let complete = FileTransferMessage::Complete { id: 1 };
     let json = serde_json::to_string(&complete)?;
-    relay.send_raw(json.as_bytes()).await?;
+    relay.send_text(json).await?;
 
     info!("File transfer complete!");
     Ok(())
@@ -367,7 +367,7 @@ pub async fn run_receive_file(
     .await?;
     info!("Connected. Waiting for file...");
 
-    let key = relay.shared_secret;
+    let key = *relay.shared_secret;
     let receiver = FileReceiver::new(PathBuf::from("."), &key);
 
     let mut pb = ProgressBar::hidden();
@@ -383,7 +383,7 @@ pub async fn run_receive_file(
                         if offset > 0 {
                             let resume_msg = FileTransferMessage::ResumeRequest { id, offset };
                             let json = serde_json::to_string(&resume_msg)?;
-                            relay.send_raw(json.as_bytes()).await?;
+                            relay.send_text(json).await?;
                             info!("Sent resume request for offset {}", offset);
                         }
 

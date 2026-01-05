@@ -18,6 +18,7 @@ use rand::Rng;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
+use zeroize::Zeroizing;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{info, warn};
 use url::Url;
@@ -288,7 +289,7 @@ pub enum PeerHandshakeState {
     /// Received AuthInit, sent response (or waiting to send)
     ReceivedAuthInit,
     /// Key exchange complete
-    Completed { shared_secret: [u8; 32] },
+    Completed { shared_secret: Zeroizing<[u8; 32]> },
 }
 
 #[derive(Clone, Debug)]
@@ -535,8 +536,8 @@ impl SwarmConnection {
     }
 
     async fn handle_binary_message(&self, data: Vec<u8>) -> Result<SwarmEvent, String> {
-        let guard = self.shared.lock().await;
-        match &guard.state {
+        let mut guard = self.shared.lock().await;
+        match &mut guard.state {
             SwarmState::Ready { cipher, .. } => {
                 // Decrypt
                 match cipher.decrypt(&data) {
@@ -559,8 +560,8 @@ impl SwarmConnection {
 
     pub async fn send_binary(&self, data: &[u8]) -> Result<(), String> {
         let encrypted = {
-            let guard = self.shared.lock().await;
-            match &guard.state {
+            let mut guard = self.shared.lock().await;
+            match &mut guard.state {
                 SwarmState::Ready { cipher, .. } => {
                     cipher.encrypt(data).map_err(|e| e.to_string())?
                 }

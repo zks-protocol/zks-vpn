@@ -1,0 +1,370 @@
+
+
+from p2pd import *
+from ecdsa import SigningKey, SECP256k1
+import hashlib
+
+#     python -W ignore::ResourceWarning your_script.py
+NIC_NAME = ""
+
+"""
+While I update the list of servers, loading WAN addresses is going to be broken.
+So I'll manually set this for both speed and reliability.
+"""
+if_info = {'id': 'eno1',
+ 'is_default': {2: True, 10: True},
+ 'mac': '00-1e-67-fa-5d-42',
+ 'name': 'eno1',
+ 'nat': {'delta': {'type': 1, 'value': 0},
+         'delta_info': 'not applicable',
+         'nat_info': 'open internet',
+         'type': 1},
+ 'netiface_index': 1,
+ 'nic_no': 0,
+ 'rp': {2: [{'af': 2,
+             'ext_ips': [{'af': 2, 'cidr': 32, 'ip': '158.69.27.176'}],
+             'link_local_ips': [],
+             'nic_ips': [{'af': 2, 'cidr': 32, 'ip': '158.69.27.176'}]}],
+        10: [{'af': 10,
+             'ext_ips': [{'af': 10, 'cidr': 128, 'ip': '2607:5300:60:80b0::1'}],
+             'link_local_ips': [],
+             'nic_ips': [{'af': 10, 'cidr': 128, 'ip': '2607:5300:60:80b0::1'}]}]
+        }
+}
+
+class TestStatus(unittest.IsolatedAsyncioTestCase):
+    async def test_address(self):
+        nic = await Interface(NIC_NAME)
+        hosts = ["www.google.com", "www.example.com", "p2pd.net"]
+        tups = {}
+        for af in nic.supported():
+            for host in hosts:
+                addr = await Address(host, 80, nic)
+                tup = addr.select_ip(af).tup
+                if tup in tups:
+                    print(fstr("dns / addr {0} {1} duplicate tup {2}", (af, host, tup,)))
+                    print(fstr("dns may be broken"))
+                    continue
+                else:
+                    print(fstr("dns / addr {0} {1} -> {2} resolve success", (af, host, tup,)))
+                    tups[tup] = 1
+
+    async def test_clock_skew(self):
+        nic = await Interface(NIC_NAME)
+        clock = await SysClock(nic)
+        if not len(clock.data_points):
+            print(fstr("clock skew failed to get data points"))
+        elif len(clock.data_points) < clock.min_data:
+            print(fstr("clock skew failed to get min data points"))
+        else:
+            print(fstr("clock skew succeeded"))
+
+    async def test_mqtt_client(self):
+        msg = "test msg"
+        peerid = to_s(rand_plain(10))
+        nic = await Interface(NIC_NAME)
+        for af in nic.supported():
+            for index in [-1, -2]:
+                serv_info = MQTT_SERVERS[index]
+                dest = (serv_info[af], serv_info["port"])
+                found_msg = []
+
+                def closure(ret):
+                    async def f_proto(payload, client):
+                        if to_s(payload) == to_s(msg):
+                            found_msg.append(True)
+
+                    return f_proto
+
+                f_proto = closure(found_msg)
+
+                client = SignalMock(peerid, f_proto, dest)
+                try:
+                    client = await client.start()
+                    await client.send_msg(msg, peerid)
+                    await asyncio.sleep(2)
+                except: # ignore timeouts if servers are down.
+                    log_exception()
+
+                if not len(found_msg):
+                    print(fstr("mqtt {0} {1} broken", (af, dest,)))
+                else:
+                    print(fstr("mqtt {0} {1} works", (af, dest,)))
+
+                await client.close()
+
+    async def test_turn_client_multi(self):
+        return
+        afs = [IP4] # Only really tested with IP4 unfortunately.
+        # Need another con with ipv6 for myself.
+        hosts = ["turn1.p2pd.net", "turn2.p2pd.net"]
+        
+        """
+        af = IP4
+        
+        a_nic = await Interface()
+        
+
+        # TURN server config.
+        dest = (hosts[0], 3478)
+        auth = ("", "")
+                
+
+        # Start TURN clients.
+        a_client = await TURNClient(af, dest, a_nic, auth, realm=None)
+
+        # In practice you will have to exchange these tups via your protocol.
+        # I use MQTT for doing that. See diagram steps (1)(3).
+        a_addr, a_relay = await a_client.get_tups()
+        print(a_addr, a_relay)
+        return
+        """
+                    
+                    
+        for host in hosts:
+            for af in afs:
+                # TURN server config.
+                dest = (host, 3478)
+                auth = ("", "")
+
+                # Each interface has a different external IP.
+                # Imagine these are two different computers.
+                a_nic = await Interface("enp0s25")
+                b_nic = await Interface("wlx00c0cab5760d")
+
+                # Start TURN clients.
+                a_client = await TURNClient(af, dest, a_nic, auth, realm=None)
+                b_client = await TURNClient(af, dest, b_nic, auth, realm=None)
+
+                # In practice you will have to exchange these tups via your protocol.
+                # I use MQTT for doing that. See diagram steps (1)(3).
+                a_addr, a_relay = await a_client.get_tups()
+                b_addr, b_relay = await b_client.get_tups()
+
+                # White list peers for sending to relay address.
+                # See diagram steps (2)(4).
+                await a_client.accept_peer(b_addr, b_relay)
+                await b_client.accept_peer(a_addr, a_relay)
+
+                # Send a message to Bob at their relay address.
+                # See middle of TURN relay diagram.
+                buf = b"hello bob"
+                for _ in range(0, 3):
+                    await a_client.send(buf)
+                
+                # Get msg from Alice from the TURN server.
+                # See middle of TURN relay diagram.
+                msg = await b_client.recv()
+                if msg == buf:
+                    print(fstr("turn {0} {1} works", (af, dest,)))
+                else:
+                    print(fstr("turn {0} {1} failed", (af, dest,)))
+
+                # Tell server to close resources for our client.
+                await a_client.close()
+                await b_client.close()
+
+
+    async def test_turn_client(self):
+        return
+        afs = [IP4,] # Only really tested with IP4 unfortunately.
+        # Need another con with ipv6 for myself.
+        hosts = ["203.56.114.226"]                
+        for host in hosts:
+            for af in afs:
+                # TURN server config.
+                dest = (host, 443)
+                auth = ("three", "")
+
+                # Each interface has a different external IP.
+                # Imagine these are two different computers.
+                nic = await Interface()
+                print(nic)
+
+                # Start TURN clients.
+                client = await TURNClient(IP4, dest, nic, auth, realm=None)
+                if client is None:
+                    print(fstr("turn {0} broken", (host,)))
+                    continue
+
+                # In practice you will have to exchange these tups via your protocol.
+                # I use MQTT for doing that. See diagram steps (1)(3).
+                a_addr, a_relay = await client.get_tups()
+                if a_addr is None or a_relay is None:
+                    print(fstr("turn {0} broken", (host,)))
+                    continue
+                
+                # Tell server to close resources for our client.
+                await client.close()
+                print(fstr("turn {0} works", (host,)))
+
+    async def test_stun_client(self):
+        hosts = ["stun1.p2pd.net", "stun2.p2pd.net"]
+        hosts = [
+            ("stun1.p2pd.net", 3478),
+        ]
+        nic = await Interface()
+        print(nic)
+        return
+        #nic = Interface.from_dict(if_info)
+        host = ("2001:1538:0001:0000:0000:0000:0224:0074", 3478)
+        client = STUNClient(IP6, host, nic, proto=UDP)
+        addr = await client.get_wan_ip()
+        print(addr)
+
+        print( nic.supported() )
+        return
+
+        
+        for af in nic.supported():
+            for proto in [UDP, TCP]:
+                for host in hosts:
+                    client = STUNClient(af, host, nic, proto=proto)
+                    try:
+                        out = await client.get_mapping()
+                        print(fstr("stun {0} {1} {2} works", (af, host, proto,)))
+                    except:
+                        what_exception()
+                        print(fstr("stun {0} {1} {2} failed", (af, host, proto,)))
+
+    async def test_pnp_client(self):
+        hosts = [0, 1]
+        nic = await Interface(NIC_NAME)
+        sys_clock = await SysClock(nic, clock_skew=Dec(0))
+
+        # Pub key crap -- used for signing PNP messages.
+        # Pub key will be used as a static name for testing too.
+        node_extra = P2PNodeExtra()
+        node_extra.listen_port = NODE_PORT
+        sk = node_extra.load_signing_key()
+
+        # Try all IPs and AFs.
+        name = sk.verifying_key.to_string("compressed")
+        name = hashlib.sha256(name).hexdigest()[:25]
+        for af in nic.supported():
+            for host in hosts:
+                serv = PNP_SERVERS[af][host]
+                dest = (serv["ip"], serv["port"])
+                client = PNPClient(
+                    sk=sk,
+                    dest=dest,
+                    dest_pk=h_to_b(serv["pk"]),
+                    nic=nic,
+                    sys_clock=sys_clock,
+                )
+
+                failed = False
+                val = rand_plain(10)
+
+                calls = [
+                    (client.push, (name, val,)),
+                    (client.fetch, (name,)),
+                    (client.delete, (name,)),
+                    (client.fetch, (name,)),
+                ]
+
+                out = None
+                failed = False
+                for call in calls:
+                    f, args = call
+                    out = await f(*args)
+                    if out is None:
+                        print(fstr("pnp {0} {1} {2} failed", (str(f), af, dest,)))
+                        failed = True
+                    else:
+                        print(fstr("pnp {0} {1} {2} {3} ok", (str(f), af, dest, out.value)))
+                
+                if out is not None:
+                    if out.value == val:
+                        failed = True
+
+                if not failed:
+                    print(fstr("pnp {0} {1} success", (af, dest,)))
+
+
+
+    async def test_nickname(self):
+        print(PNP_SERVERS)
+        nic = await Interface(NIC_NAME)
+        sys_clock = await SysClock(nic, clock_skew=Dec(0))
+        print(nic)
+
+        # Pub key crap -- used for signing PNP messages.
+        # Pub key will be used as a static name for testing too.
+        node_extra = P2PNodeExtra()
+        node_extra.listen_port = NODE_PORT
+        sk = node_extra.load_signing_key()
+        print(sk)
+
+        # Load nickname client.
+        nick = await Nickname(
+            sk=sk,
+            ifs=[nic],
+            sys_clock=sys_clock,
+        )
+
+        # Test push works.
+        val = rand_plain(10)
+        name = sk.verifying_key.to_string("compressed")
+        name = hashlib.sha256(name).hexdigest()[:25]
+
+
+        fqn = None
+        calls = [
+            (nick.push, (name, "1"), 1),
+            (nick.fetch, None, 1),
+            (nick.delete, None, 1),
+            (nick.fetch, None, 0),
+        ]
+
+        for call in calls:
+            f, args, should_succeed = call
+
+            try:
+                if args is None:
+                    await f(fqn)
+                else:
+                    fqn = await f(*args)
+            except:
+                log_exception()
+                if should_succeed:
+                    fqn = None
+
+            if fqn is None:
+                print(fstr("nick {0} {1} failed", (str(f), name,)))
+            else:
+                print(fstr("nick {0} {1} ok", (str(f), fqn,)))
+
+    async def test_encryption(self):
+        # Pub key crap -- used for signing PNP messages.
+        # Pub key will be used as a static name for testing too.
+        node_extra = P2PNodeExtra()
+        node_extra.listen_port = NODE_PORT
+        sk = node_extra.load_signing_key()
+
+        dest_sk = ecdsa.SigningKey.generate(curve=SECP256k1)
+        dest_vk = dest_sk.verifying_key.to_string("compressed")
+
+        buf = b"A cat is fine too."
+        out = encrypt(dest_vk, buf)
+        out = decrypt(dest_sk, out)
+        if out != buf:
+            print(fstr("Encryption is broken."))
+        else:
+            print(fstr("Encryption works"))
+
+    async def test_start_node_server(self):
+        conf = dict_child({
+            "reuse_addr": False,
+            "enable_upnp": False,
+            "sig_pipe_no": 3,
+        }, NET_CONF)
+
+        n = await P2PNode(conf=conf)
+        print(n.ifs)
+        print(n.addr_bytes)
+        print(n.listen_port)
+        await n.close()
+        
+if __name__ == '__main__':
+    main()

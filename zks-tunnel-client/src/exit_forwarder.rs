@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn test_is_exit_traffic() {
         let (tx, _rx) = mpsc::channel(10);
-        let forwarder = ExitForwarder::new(Ipv4Addr::new(10, 0, 0, 1), tx);
+        let _forwarder = ExitForwarder::new(Ipv4Addr::new(10, 0, 0, 1), tx);
 
         // Build a simple IPv4 packet header for testing
         // This is a minimal test - in reality packets are more complex

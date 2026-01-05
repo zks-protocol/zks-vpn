@@ -12,6 +12,29 @@ use std::io::Cursor;
 /// Maximum size of a single frame (1MB)
 pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 
+/// NAT signaling message for NAT traversal coordination
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum NatSignalingMessage {
+    /// NAT type information exchange
+    NatInfo {
+        delta_type: String,
+        avg_delta: f64,
+        last_port: u16,
+    },
+    /// Port prediction coordination
+    PortPrediction {
+        ports: Vec<u16>,
+        nat_type: String,
+        timeout_ms: u64,
+    },
+    /// Birthday attack coordination
+    BirthdayAttack {
+        start_port: u16,
+        end_port: u16,
+        listen_count: u16,
+    },
+}
+
 /// Command types for the tunnel protocol
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +73,8 @@ pub enum CommandType {
     BatchIpPacket = 0x21,
     /// Control message (raw JSON/Text) - internal use, not sent on wire as binary
     Control = 0x30,
+    /// NAT signaling message for NAT traversal coordination
+    NatSignaling = 0x31,
 }
 
 impl TryFrom<u8> for CommandType {
@@ -192,6 +217,9 @@ pub enum TunnelMessage {
     /// Control message (raw JSON/Text)
     /// Used to pass non-tunnel messages (like Swarm Entropy events) up from the relay
     Control { message: String },
+    /// NAT signaling message for NAT traversal coordination
+    /// Used for port prediction and birthday attack coordination
+    NatSignaling(NatSignalingMessage),
 }
 
 impl TunnelMessage {
@@ -350,6 +378,21 @@ impl TunnelMessage {
                 for p in packets {
                     buf.put_u32(p.len() as u32);
                     buf.put_slice(p);
+                }
+            }
+            TunnelMessage::NatSignaling(nat_msg) => {
+                // NAT signaling messages are JSON-encoded
+                match serde_json::to_string(nat_msg) {
+                    Ok(json) => {
+                        buf.put_u8(CommandType::NatSignaling as u8);
+                        buf.put_u32(json.len() as u32);
+                        buf.put_slice(json.as_bytes());
+                    }
+                    Err(e) => {
+                        // Log error and skip this message
+                        eprintln!("Failed to serialize NAT signaling message: {}", e);
+                        return Bytes::new();
+                    }
                 }
             }
             TunnelMessage::Control { message } => {
@@ -694,6 +737,22 @@ impl TunnelMessage {
                 }
 
                 Ok(TunnelMessage::BatchIpPacket { packets })
+            }
+            CommandType::NatSignaling => {
+                if cursor.remaining() < 4 {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let msg_len = cursor.get_u32() as usize;
+                if cursor.remaining() < msg_len {
+                    return Err(crate::ProtoError::InsufficientData);
+                }
+                let mut msg_bytes = vec![0u8; msg_len];
+                cursor.copy_to_slice(&mut msg_bytes);
+                let json_str = String::from_utf8(msg_bytes).map_err(|_| crate::ProtoError::InvalidUtf8)?;
+                let nat_msg = serde_json::from_str::<NatSignalingMessage>(&json_str)
+                    .map_err(|_| crate::ProtoError::InvalidCommand(0x31))?;
+
+                Ok(TunnelMessage::NatSignaling(nat_msg))
             }
             CommandType::Control => {
                 if cursor.remaining() < 4 {

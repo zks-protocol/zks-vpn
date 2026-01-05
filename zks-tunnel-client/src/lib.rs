@@ -57,22 +57,39 @@ pub mod swarm;
 #[cfg(feature = "swarm")]
 pub mod onion;
 
+pub mod nat_detection;
+pub mod port_prediction;
+pub mod nat_traversal;
+pub mod birthday_attack;
+pub mod stun_security;
+pub mod secure_stun;
+pub mod secure_port_prediction;
+pub mod secure_birthday_attack;
+
 pub mod entropy_events;
 pub mod entropy_tax;
 #[cfg(feature = "vpn")]
 pub mod exit_forwarder;
 pub mod exit_service;
 pub mod key_rotation;
+pub mod recursive_chain;  // Citadel-inspired double-ratchet key evolution
 pub mod relay_service;
-pub mod replay_protection;
+pub mod anti_replay;  // Citadel-inspired anti-replay (replaces old replay_protection)
+pub mod anti_replay_enhanced;  // Enhanced anti-replay with circular buffer
+#[cfg(feature = "quantum")]
+pub mod pq_signatures;  // Post-quantum ML-DSA-65 signatures
 pub mod swarm_entropy_collection;
 pub mod tls_mimicry;
 pub mod traffic_mixer;
 pub mod traffic_shaping;
+pub mod scramble;  // Citadel-inspired ciphertext scrambling for traffic analysis resistance
 pub mod true_vernam;
 
 #[cfg(feature = "swarm")]
 pub mod signaling;
+
+#[cfg(feature = "swarm")]
+pub mod libp2p_transport;
 
 #[cfg(feature = "swarm")]
 pub mod swarm_controller;

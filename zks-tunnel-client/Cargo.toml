@@ -15,7 +15,7 @@ default = ["socks5", "quantum", "vpn"]
 socks5 = []
 vpn = ["tun-rs", "netstack-smoltcp", "smoltcp"]
 quantum = ["dep:ml-kem"]
-swarm = ["dep:libp2p", "quantum", "vpn"]
+swarm = ["dep:libp2p", "dep:libp2p-stream", "dep:async-trait", "quantum", "vpn"]
 
 [dependencies]
 zks-tunnel-proto = { path = "../zks-tunnel-proto" }
@@ -56,7 +56,9 @@ native-tls = "0.2"
 tokio-native-tls = "0.3"
 
 # libp2p for P2P swarm with DCUtR hole-punching (optional, for swarm feature)
-libp2p = { version = "0.54", features = ["dcutr", "relay", "identify", "noise", "tcp", "quic", "yamux", "dns", "tokio", "macros", "ping", "kad"], optional = true }
+libp2p = { version = "0.54", features = ["dcutr", "relay", "identify", "noise", "tcp", "quic", "yamux", "dns", "tokio", "macros", "ping", "kad", "request-response"], optional = true }
+libp2p-stream = { version = "0.2.0-alpha", optional = true }
+async-trait = { version = "0.1", optional = true }
 
 # Post-quantum cryptography (optional, for swarm feature)
 ml-kem = { version = "0.2", optional = true }
@@ -70,6 +72,16 @@ subtle = "2.6"
 zeroize = { version = "1.8", features = ["derive"] }
 crossbeam-queue = "0.3.12"
 num_cpus = "1.17.0"
+
+# Statistical distributions for port prediction
+rand_distr = "0.4"
+
+# Async stream utilities for command processing
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+# High-performance synchronization primitives
+parking_lot = "0.12"
+ml-dsa = "0.0.4"
 
 [target.'cfg(windows)'.dependencies]
 # Windows-specific: Wintun driver bindings and routing APIs

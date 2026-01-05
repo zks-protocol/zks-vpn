@@ -286,7 +286,7 @@ mod tests {
         let relay_tx = channels.relay_tx.clone();
 
         // Start mixer in background
-        let mixer = channels.create_mixer(config);
+        let _mixer = channels.create_mixer(config);
 
         client_tx
             .send(TrafficPacket::ClientTraffic {

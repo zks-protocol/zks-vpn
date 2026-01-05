@@ -17,6 +17,7 @@ use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use x25519_dalek::{EphemeralSecret, PublicKey, SharedSecret, StaticSecret};
+use zeroize::Zeroizing;
 
 #[cfg(feature = "quantum")]
 use ml_kem::kem::{Decapsulate, Encapsulate};
@@ -70,11 +71,11 @@ pub struct KeyExchange {
     /// Peer's identity public key (derived from room for them too)
     peer_identity_public: Option<PublicKey>,
     /// Derived shared secret (after exchange)
-    shared_secret: Option<SharedSecret>,
+    shared_secret: Option<Zeroizing<SharedSecret>>,
     /// Session key (from HKDF)
-    session_key: Option<[u8; 32]>,
+    session_key: Option<Zeroizing<[u8; 32]>>,
     /// Derived encryption key (from HKDF, 1MB)
-    encryption_key: Option<Vec<u8>>,
+    encryption_key: Option<Zeroizing<Vec<u8>>>,
     /// Current state
     pub state: KeyExchangeState,
     /// Room ID (used as HKDF salt and identity derivation)
@@ -92,7 +93,7 @@ pub struct KeyExchange {
     peer_kyber_public: Option<EncapsulationKey<MlKem768Params>>,
     /// Kyber shared secret
     #[cfg(feature = "quantum")]
-    kyber_shared_secret: Option<SharedKey<MlKem768>>,
+    kyber_shared_secret: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for KeyExchange {
@@ -320,7 +321,7 @@ impl KeyExchange {
             let (ct, ss) = pk
                 .encapsulate(&mut OsRng)
                 .map_err(|_| "Kyber encapsulation failed")?;
-            self.kyber_shared_secret = Some(ss);
+            self.kyber_shared_secret = Some(Zeroizing::new(ss.to_vec()));
             self.peer_kyber_public = Some(pk);
             let ct_bytes = ct.as_slice();
             Some(hex::encode(ct_bytes))
@@ -393,8 +394,8 @@ impl KeyExchange {
         hk.expand(b"zks-session-key-v1", &mut session_key)
             .expect("HKDF expand failed");
 
-        self.shared_secret = Some(dh1);
-        self.session_key = Some(session_key);
+        self.shared_secret = Some(Zeroizing::new(dh1));
+        self.session_key = Some(Zeroizing::new(session_key));
         Ok(())
     }
 
@@ -410,7 +411,7 @@ impl KeyExchange {
             .ok_or("Session key not computed")?;
 
         let mut mac =
-            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
+            HmacSha256::new_from_slice(session_key.as_ref()).expect("HMAC can take key of any size");
         mac.update(our_eph_pk);
         mac.update(peer_eph_pk);
         mac.update(b"responder_auth");
@@ -478,7 +479,7 @@ impl KeyExchange {
             let ss = sk
                 .decapsulate(&ct)
                 .map_err(|_| "Kyber decapsulation failed")?;
-            self.kyber_shared_secret = Some(ss);
+            self.kyber_shared_secret = Some(Zeroizing::new(ss.to_vec()));
         }
 
         // Compute session key
@@ -520,7 +521,7 @@ impl KeyExchange {
             .ok_or("Session key not computed")?;
 
         let mut mac =
-            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
+            HmacSha256::new_from_slice(session_key.as_ref()).expect("HMAC can take key of any size");
         mac.update(peer_eph_pk); // Their ephemeral (in their message)
         mac.update(our_eph_pk); // Our ephemeral
         mac.update(b"responder_auth");
@@ -547,7 +548,7 @@ impl KeyExchange {
             .ok_or("Session key not computed")?;
 
         let mut mac =
-            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
+            HmacSha256::new_from_slice(session_key.as_ref()).expect("HMAC can take key of any size");
         mac.update(our_eph_pk);
         mac.update(peer_eph_pk);
         mac.update(b"initiator_confirm");
@@ -584,7 +585,7 @@ impl KeyExchange {
             .ok_or("Session key not computed")?;
 
         let mut mac =
-            HmacSha256::new_from_slice(session_key).expect("HMAC can take key of any size");
+            HmacSha256::new_from_slice(session_key.as_ref()).expect("HMAC can take key of any size");
         mac.update(&peer_eph_pk_bytes); // Their ephemeral
         mac.update(&our_eph_pk_bytes); // Our ephemeral
         mac.update(b"initiator_confirm");
@@ -611,7 +612,7 @@ impl KeyExchange {
             let salt = self.room_id.as_bytes();
             let info = b"ZKS-VPN v1.0 encryption key";
 
-            let hk = Hkdf::<Sha256>::new(Some(salt), session_key);
+            let hk = Hkdf::<Sha256>::new(Some(salt), session_key.as_ref());
 
             // 1. Derive 32-byte seed using HKDF
             let mut seed = [0u8; 32];
@@ -634,13 +635,13 @@ impl KeyExchange {
             // Truncate to exact size
             key_material.truncate(target_size);
 
-            self.encryption_key = Some(key_material);
+            self.encryption_key = Some(Zeroizing::new(key_material));
         }
     }
 
     /// Get the derived encryption key (only available after exchange complete)
     pub fn get_encryption_key(&self) -> Option<&[u8]> {
-        self.encryption_key.as_deref()
+        self.encryption_key.as_deref().map(|v| v.as_slice())
     }
 
     /// Get the 32-byte shared secret (X25519)
@@ -677,7 +678,7 @@ impl KeyExchange {
         // Compute shared secret using legacy method
         if let Some(secret) = self.ephemeral_secret.take() {
             let shared_secret = secret.diffie_hellman(&peer_public_key);
-            self.shared_secret = Some(shared_secret);
+            self.shared_secret = Some(Zeroizing::new(shared_secret));
 
             // Derive session key for compatibility
             let shared_secret_ref = self.shared_secret.as_ref().unwrap();
@@ -686,7 +687,7 @@ impl KeyExchange {
             let mut session_key = [0u8; 32];
             hk.expand(b"zks-session-key-v1", &mut session_key)
                 .expect("HKDF expand failed");
-            self.session_key = Some(session_key);
+            self.session_key = Some(Zeroizing::new(session_key));
 
             // Derive encryption key using HKDF
             self.derive_encryption_key();

@@ -8,15 +8,29 @@
 
 md.wasif.faisal@g.bracu.ac.bd
 
-**Draft Revision 1.0**
+**Draft Revision 3.0**
 
 ---
 
 ## Abstract
 
-ZKS (Zero-Knowledge Swarm) is a secure communication protocol, operating at layer 3-7, designed to provide censorship-resistant, privacy-preserving tunneling for applications ranging from VPNs to file transfer and messaging. Unlike traditional approaches that rely on established patterns detectable by Deep Packet Inspection (DPI), ZKS employs ChaCha20-Poly1305 AEAD encryption with a 3-message authenticated handshake providing mutual authentication and forward secrecy. The protocol achieves stealth through traffic shaping, constant-rate padding, and protocol mimicry, making encrypted tunnels indistinguishable from legitimate HTTPS traffic. Key exchange is accomplished using a hybrid construction combining X25519 for classical security and ML-KEM (Kyber768) for post-quantum resistance, with HKDF-based key derivation. ZKS v2.0 introduces **True Vernam** mode—an optional encryption layer providing information-theoretic security through triple-source entropy (local CSPRNG, Cloudflare LavaRand, and peer-collected randomness), ensuring mathematically unbreakable encryption when combined with the defense-in-depth ChaCha20 layer. Security enhancements include replay attack protection via nonce tracking, constant-time HMAC verification to prevent timing attacks, automatic key rotation with ratcheting for enhanced forward secrecy, and continuous entropy refresh. For peer-to-peer deployments, ZKS integrates with libp2p's DCUtR protocol for NAT traversal, enabling direct connections even behind restrictive firewalls. The "Swarm" in Zero-Knowledge Swarm refers to the protocol's core innovation: a decentralized peer-to-peer topology where any participant can dynamically assume the role of client, relay, or exit node, creating a self-organizing mesh that is inherently resistant to blocking. The protocol is designed to be minimal—under 5,000 lines of Rust for the core implementation—while providing strong forward secrecy, identity hiding, replay protection, and resistance to traffic analysis. Performance benchmarks demonstrate throughput competitive with WireGuard while maintaining significantly stronger censorship resistance properties.
+ZKS (Zero-Knowledge Swarm) is a secure communication protocol, operating at layer 3-7, designed to provide censorship-resistant, privacy-preserving tunneling for applications ranging from VPNs to file transfer and messaging. The protocol introduces two URL schemes: **zk://** for direct encrypted connections and **zks://** for anonymous swarm-routed connections—analogous to HTTP vs HTTPS but with post-quantum encryption and optional untraceability.
 
-**Keywords:** VPN, privacy, censorship resistance, zero-knowledge, post-quantum cryptography, traffic analysis resistance, information-theoretic security, one-time pad
+Unlike traditional approaches that rely on established patterns detectable by Deep Packet Inspection (DPI), ZKS employs the **Wasif-Vernam Cipher**—a hybrid encryption scheme combining ChaCha20-Poly1305 AEAD with TRUE random entropy from the **drand distributed randomness beacon** (https://drand.love). Key exchange is accomplished using ML-KEM (Kyber768) for post-quantum resistance, with HKDF-based key derivation.
+
+ZKS v3.0 introduces two operational modes:
+- **ZK Mode (zk://):** Direct encrypted connection with computationally unbreakable security
+- **ZKS Mode (zks://):** Swarm-routed anonymous connection with multi-hop onion routing, providing both encryption AND untraceability
+
+The **Wasif-Vernam Cipher** supports two security levels:
+- **Standard Mode:** drand + ML-KEM + ChaCha20 for unlimited file sizes with computational security
+- **TRUE Vernam Mode:** Swarm-contributed entropy for information-theoretic security on smaller payloads
+
+Security enhancements include replay attack protection via nonce tracking, constant-time HMAC verification, automatic key rotation with ratcheting, and continuous entropy refresh from the drand beacon (cached every 30 seconds). For peer-to-peer deployments, ZKS integrates with libp2p's DCUtR protocol for NAT traversal. The "Swarm" in Zero-Knowledge Swarm refers to multi-hop onion routing where traffic bounces through multiple peers, hiding the user's IP address from both observers and destination servers—making ZKS traffic both unbreakable AND untraceable.
+
+The protocol is designed to be minimal—under 5,000 lines of Rust for the core implementation—while providing strong forward secrecy, identity hiding, replay protection, and resistance to traffic analysis. Performance benchmarks demonstrate throughput competitive with WireGuard while maintaining significantly stronger censorship resistance properties.
+
+**Keywords:** VPN, privacy, censorship resistance, zero-knowledge, post-quantum cryptography, traffic analysis resistance, information-theoretic security, one-time pad, drand, onion routing, anonymous communication, zk://, zks://
 
 ---
 
@@ -87,7 +101,11 @@ ZKS is built on three core principles:
 
 This paper makes the following contributions:
 
-- **Wasif-Vernam Cipher:** A novel XOR-based encryption scheme providing **information-theoretic security** through triple-source entropy (local CSPRNG, Cloudflare LavaRand, and peer-collected randomness). Delivers mathematically unbreakable encryption with defense-in-depth ChaCha20-Poly1305 layering and graceful HKDF fallback.
+- **Wasif-Vernam Cipher:** A hybrid encryption scheme combining ChaCha20-Poly1305 AEAD with TRUE random entropy from the drand distributed randomness beacon. Provides two modes: **Standard** (drand + ML-KEM + ChaCha20 for unlimited file sizes) and **TRUE Vernam** (swarm-contributed entropy for information-theoretic security).
+
+- **ZK/ZKS URL Schemes:** Two protocol modes analogous to HTTP/HTTPS: `zk://` for direct encrypted connections (unbreakable) and `zks://` for swarm-routed anonymous connections (unbreakable AND untraceable).
+
+- **drand Integration:** FREE, decentralized TRUE random entropy from the League of Entropy (Cloudflare, EPFL, Protocol Labs, and 13+ other organizations), providing cryptographically unpredictable seeds without rate limits or costs.
 
 - **Entropy Tax:** A decentralized mechanism for generating cryptographic randomness from the participation of peers in the network, reducing reliance on potentially compromised local random number generators.
 
@@ -374,41 +392,44 @@ The Wasif-Vernam cipher provides **information-theoretic security**—mathematic
 └─────────────────────────────────────────────────────────────┘
 ```
 
-#### Triple-Source Entropy (Trustless Randomness)
+#### Entropy Sources: drand Beacon + User Random
 
-True Vernam derives its key material from three independent entropy sources:
+The Wasif-Vernam cipher derives its key material from multiple sources, with drand as the primary TRUE random source:
 
 ```rust
-// Hybrid Entropy Fetcher
-let mut hasher = Sha256::new();
+// Key Derivation with drand
+let drand_entropy = drand::get_entropy().await?;  // 32 bytes, TRUE random
+let user_random = getrandom(&mut buf)?;           // 32 bytes, OS CSPRNG
+let ml_kem_secret = ml_kem::decapsulate(ct)?;     // From key exchange
 
-// Source 1: Local CSPRNG (you trust your device)
-hasher.update(local_entropy);  // 32 bytes from getrandom()
-
-// Source 2: Worker Entropy (Cloudflare LavaRand)
-hasher.update(worker_entropy);  // 32 bytes from edge worker
-
-// Source 3: Swarm Seed (peer commit/reveal)
-if let Some(swarm_seed) = &self.swarm_seed {
-    hasher.update(swarm_seed);  // 32 bytes from peers
-}
-
-// Timestamp for forward secrecy
-hasher.update(timestamp.to_be_bytes());
-
-let combined: [u8; 32] = hasher.finalize().into();
+// Mix all sources via HKDF
+let master_key = hkdf::expand(
+    &[drand_entropy, user_random, ml_kem_secret, session_id],
+    "zks-wasif-vernam-v3"
+);
 ```
 
-#### Trust Model
+**drand Beacon Specification:**
 
-| Scenario | Entropy Sources | Trust Level |
-|----------|-----------------|-------------|
-| **With peers** | Local + Worker + Peers | **TRUSTLESS** |
-| **Without peers** | Local + Worker | Trust Cloudflare |
-| **Worker down** | Local × 2 + Peers | **TRUSTLESS** |
-| **No peers + Worker down** | Local × 2 | Trust your device |
+| Property | Value |
+|----------|-------|
+| Source | League of Entropy (Cloudflare, EPFL, Protocol Labs, etc.) |
+| Update frequency | Every 30 seconds |
+| Entropy quality | TRUE random (threshold BLS signatures) |
+| Cost | FREE, unlimited |
+| Caching | Server caches current round, instant access |
+| API | `https://api.drand.sh/public/latest` |
 
-**Security Guarantee:** To compromise the encryption, an attacker must compromise ALL active entropy sources simultaneously.
+#### Trust Model with drand
+
+| Component | Trust Requirement | Can Break Encryption? |
+|-----------|-------------------|----------------------|
+| drand | 16+ orgs threshold | ❌ No (even if known) |
+| User random | Local OS | ❌ No (unique per user) |
+| ML-KEM secret | Key exchange | ❌ No (post-quantum) |
+| All three combined | - | ✅ Unbreakable |
+
+**Security Guarantee:** The master key is derived from three independent sources. Attacker must compromise ALL sources to break encryption. Even if drand values are public (they are!), the user random and ML-KEM secret remain private.
 
 #### Buffer Management
 
@@ -680,6 +701,98 @@ If hole punching fails after 3 attempts, traffic is relayed through R. The relay
 
 In Swarm Mode (the default configuration), all participants are **Client + Relay + Exit** nodes. This "True Swarm" topology ensures maximum decentralization and plausible deniability, as every node contributes bandwidth and exit capacity to the network. Users can opt-out of specific roles (e.g., `--no-exit`) if desired.
 
+### 5.4 ZK:// vs ZKS:// URL Schemes
+
+ZKS introduces two URL schemes analogous to HTTP vs HTTPS, providing different levels of privacy:
+
+| Scheme | Mode | Encryption | Anonymous | Speed |
+|--------|------|------------|-----------|-------|
+| `zk://` | Direct | ✅ Unbreakable | ❌ IP visible | ⚡ Fast |
+| `zks://` | Swarm | ✅ Unbreakable | ✅ IP hidden | 🔶 Moderate |
+
+#### ZK Mode (zk://)
+
+Direct encrypted connection between client and server:
+
+```
+zk://example.com/resource
+
+Client (IP: 1.2.3.4) ─────────────────► Server
+                         │
+         Server sees YOUR IP, but content is encrypted
+```
+
+Use cases:
+- High-speed file transfer
+- Video streaming
+- Gaming
+- Public content access
+
+#### ZKS Mode (zks://)
+
+Anonymous swarm-routed connection with multi-hop onion routing:
+
+```
+zks://example.com/resource
+
+Client ─► Entry Node ─► Middle Node ─► Exit Node ─► Server
+   │          │             │              │
+   └──────────┴─────────────┴──────────────┴── Each layer encrypted
+                                               Server sees Exit Node's IP only
+```
+
+**What each party knows:**
+
+| Party | Knows Your IP | Knows Destination |
+|-------|---------------|-------------------|
+| Entry Node | ✅ Yes | ❌ No |
+| Middle Node(s) | ❌ No | ❌ No |
+| Exit Node | ❌ No | ✅ Yes |
+| Destination | ❌ No | ✅ (itself) |
+
+**No single node knows both your identity AND your destination.**
+
+#### Onion Encryption
+
+Each hop adds a layer of encryption, peeled off at each node:
+
+```rust
+// Build onion-encrypted message
+let layer_3 = encrypt(key_exit, "GET /resource -> server");
+let layer_2 = encrypt(key_middle, format!("-> exit_node: {}", layer_3));
+let layer_1 = encrypt(key_entry, format!("-> middle_node: {}", layer_2));
+
+// Send layer_1 to entry_node
+```
+
+#### URL Parsing
+
+```rust
+pub enum ZkScheme {
+    ZK,   // Direct mode
+    ZKS { min_hops: u8 },  // Swarm mode with hop count
+}
+
+pub fn parse_url(url: &str) -> (ZkScheme, String) {
+    if url.starts_with("zks://") {
+        (ZkScheme::ZKS { min_hops: 3 }, url[6..].into())
+    } else if url.starts_with("zk://") {
+        (ZkScheme::ZK, url[5..].into())
+    } else {
+        panic!("Unknown scheme")
+    }
+}
+```
+
+#### Security Comparison
+
+| Feature | zk:// | zks:// | HTTPS |
+|---------|-------|--------|-------|
+| Encryption | ✅ Post-quantum | ✅ Post-quantum | ❌ Classical |
+| IP Hidden | ❌ | ✅ | ❌ |
+| Traffic Analysis Resistant | ⚠️ Partial | ✅ | ❌ |
+| Quantum-safe | ✅ | ✅ | ❌ |
+
 ### 5.4 Secure File Transfer (Private Torrent)
 
 ZKS leverages its P2P architecture to offer a **private, unblockable alternative to BitTorrent**.
@@ -941,8 +1054,17 @@ ZKS demonstrates that it is possible to build a communication protocol that achi
 2. **Hybrid cryptography provides durability:** Post-quantum + classical = belt and suspenders
 3. **Decentralization enables resilience:** P2P swarms are harder to block than servers
 4. **Domain fronting enables stealth:** CDN integration provides cover traffic
+5. **drand enables TRUE randomness:** Free, decentralized entropy for unbreakable encryption
+6. **Two modes serve all needs:** zk:// for speed, zks:// for anonymity
 
 The ZKS protocol provides a foundation for building privacy-preserving applications beyond VPN—including file transfer, messaging, and voice communication—all using the same underlying primitives.
+
+**Summary of Protocol Modes:**
+
+| Mode | URL Scheme | Security | Anonymous |
+|------|------------|----------|----------|
+| Direct | `zk://` | Unbreakable | No |
+| Swarm | `zks://` | Unbreakable | Yes |
 
 ---
 
@@ -987,6 +1109,10 @@ The ZKS protocol provides a foundation for building privacy-preserving applicati
 [16] Oscar Reparaz et al. "dudect: A Simple Tool for Timing Leakage Detection." CHES 2017.
 
 [17] NIST. "SP 800-90B: Recommendation for the Entropy Sources Used for Random Bit Generation." January 2018.
+
+[18] Drand Team. "drand: Distributed Randomness Beacon Daemon." https://drand.love/ League of Entropy, 2024.
+
+[19] Nicolas Gailly, Kelsey Melissaris, Yolan Romailler. "tlock: Practical Timelock Encryption from Threshold BLS." Cryptology ePrint Archive, Report 2023/189.
 
 ---
 

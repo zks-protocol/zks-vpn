@@ -4,6 +4,8 @@
 //! between Client and Exit Peer with ZKS double-key Vernam encryption.
 
 use crate::key_exchange::{KeyExchange, KeyExchangeMessage};
+use crate::recursive_chain::RecursiveChain;
+use crate::scramble::CiphertextScrambler;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Key, Nonce,
@@ -23,6 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{client_async, WebSocketStream};
 use tracing::{debug, info, warn};
 use url::Url;
+use zeroize::{Zeroize, Zeroizing};
 pub use zks_tunnel_proto::TunnelMessage;
 
 /// Peer role in the VPN relay
@@ -53,24 +56,33 @@ pub struct WasifVernam {
     cipher: ChaCha20Poly1305,
     /// Nonce counter (incremented per message)
     nonce_counter: AtomicU64,
+    /// Enhanced anti-replay protection (Citadel-inspired HashSet window)
+    anti_replay: Arc<crate::anti_replay::AntiReplayContainer>,
     /// Swarm entropy seed (32 bytes from combined peer entropy) - for HKDF mode
-    swarm_seed: [u8; 32],
+    swarm_seed: Zeroizing<[u8; 32]>,
     /// Key offset (tracks how much key material has been used) - for HKDF mode
     key_offset: AtomicU64,
     /// Has swarm entropy (false = ChaCha20 only mode)
     has_swarm_entropy: bool,
     /// True Vernam buffer (if Some, uses TRUE random bytes instead of HKDF)
     true_vernam_buffer: Option<Arc<Mutex<crate::true_vernam::TrueVernamBuffer>>>,
+    /// Ciphertext scrambler for traffic analysis resistance
+    scrambler: Option<CiphertextScrambler>,
+    /// Recursive key chain for forward secrecy and key rotation
+    key_chain: Option<RecursiveChain>,
 }
 
 impl std::fmt::Debug for WasifVernam {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WasifVernam")
             .field("nonce_counter", &self.nonce_counter)
+            .field("anti_replay_counter", &self.anti_replay.current_counter())
             .field("swarm_seed", &"[REDACTED]") // Security: don't log key material
             .field("key_offset", &self.key_offset)
             .field("has_swarm_entropy", &self.has_swarm_entropy)
             .field("true_vernam_buffer", &self.true_vernam_buffer.is_some())
+            .field("scrambler", &self.scrambler.is_some())
+            .field("key_chain", &self.key_chain.is_some())
             .finish()
     }
 }
@@ -92,18 +104,21 @@ impl WasifVernam {
             let mut hasher = Sha256::new();
             hasher.update(&swarm_entropy);
             let hash: [u8; 32] = hasher.finalize().into();
-            (hash, true)
+            (Zeroizing::new(hash), true)
         } else {
-            ([0u8; 32], false)
+            (Zeroizing::new([0u8; 32]), false)
         };
 
         Self {
             cipher,
             nonce_counter: AtomicU64::new(0),
+            anti_replay: Arc::new(crate::anti_replay::AntiReplayContainer::default()),
             swarm_seed,
             key_offset: AtomicU64::new(0),
             has_swarm_entropy,
             true_vernam_buffer: None, // Default to HKDF mode
+            scrambler: None, // No scrambling by default
+             key_chain: None, // No key rotation by default
         }
     }
 
@@ -112,6 +127,97 @@ impl WasifVernam {
     pub fn enable_true_vernam(&mut self, buffer: Arc<Mutex<crate::true_vernam::TrueVernamBuffer>>) {
         self.true_vernam_buffer = Some(buffer);
         info!("🔐 TRUE VERNAM MODE ENABLED - Information-theoretic security active!");
+    }
+
+    /// Enable ciphertext scrambling for traffic analysis resistance
+    /// 
+    /// # Arguments
+    /// * `entropy` - 32 bytes of shared entropy to derive scrambling permutation
+    /// * `packet_size` - Size of packets to scramble (must be <= 65536 bytes)
+    pub fn enable_scrambling(&mut self, entropy: &[u8; 32], packet_size: usize) {
+        if packet_size > crate::scramble::MAX_SCRAMBLE_SIZE {
+            warn!("Packet size {} exceeds maximum scramble size {}, disabling scrambling", 
+                  packet_size, crate::scramble::MAX_SCRAMBLE_SIZE);
+            return;
+        }
+        
+        self.scrambler = Some(CiphertextScrambler::from_entropy(entropy, packet_size));
+        info!("🔄 CIPHERTEXT SCRAMBLING ENABLED - Traffic analysis resistance active!");
+    }
+
+    /// Disable ciphertext scrambling
+    pub fn disable_scrambling(&mut self) {
+        self.scrambler = None;
+        info!("🔄 Ciphertext scrambling disabled");
+    }
+
+    /// Enable recursive key chain for forward secrecy
+    /// 
+    /// # Arguments
+    /// * `is_alice` - True if we're the initiator (Alice), false for responder (Bob)
+    pub fn enable_key_chain(&mut self, is_alice: bool) {
+        // Create recursive chain from the current shared secret (swarm_seed)
+        self.key_chain = Some(RecursiveChain::new(&*self.swarm_seed, is_alice));
+        info!("🔗 RECURSIVE KEY CHAIN ENABLED - Forward secrecy active!");
+    }
+
+    /// Advance the recursive key chain with new entropy
+    /// 
+    /// # Arguments
+    /// * `new_entropy` - Fresh entropy to mix into the chain
+    /// 
+    /// # Returns
+    /// The new session key (32 bytes) for the next encryption operation
+    pub fn advance_key_chain(&mut self, new_entropy: &[u8]) -> Option<[u8; 32]> {
+        if let Some(ref mut chain) = self.key_chain {
+            let new_key = chain.advance(new_entropy);
+            info!("🔗 Key chain advanced to generation {}", chain.generation());
+            Some(new_key)
+        } else {
+            warn!("Key chain not enabled, cannot advance");
+            None
+        }
+    }
+
+    /// Update peer's contribution key in the recursive chain
+    /// 
+    /// # Arguments
+    /// * `peer_contribution` - 32-byte contribution key from peer
+    pub fn update_peer_contribution(&mut self, peer_contribution: &[u8; 32]) {
+        if let Some(ref mut chain) = self.key_chain {
+            chain.update_peer_key(peer_contribution);
+            info!("🔗 Updated peer contribution in key chain");
+        } else {
+            warn!("Key chain not enabled, cannot update peer contribution");
+        }
+    }
+
+    /// Get current key chain generation
+    pub fn key_chain_generation(&self) -> Option<u64> {
+        self.key_chain.as_ref().map(|chain| chain.generation())
+    }
+
+    /// Get our current contribution key for peer exchange
+    pub fn our_contribution_key(&self) -> Option<[u8; 32]> {
+        self.key_chain.as_ref().map(|chain| chain.our_contribution())
+    }
+
+    /// Get the current encryption key (from key chain or static)
+    fn get_current_key(&self) -> [u8; 32] {
+        if let Some(ref chain) = self.key_chain {
+            // Use the current session key from the recursive chain
+            chain.our_contribution()
+        } else {
+            // Fall back to the original shared secret (swarm_seed)
+            *self.swarm_seed
+        }
+    }
+
+    /// Update the cipher with a new key (for key rotation)
+    fn update_cipher_key(&mut self, new_key: [u8; 32]) {
+        let key = Key::from_slice(&new_key);
+        self.cipher = ChaCha20Poly1305::new(key);
+        info!("🔑 Cipher key updated for key rotation");
     }
 
     /// Generate keystream bytes at a given offset using HKDF
@@ -129,7 +235,7 @@ impl WasifVernam {
             let chunk_index = current_offset / chunk_size as u64;
             let context = format!("wasif-vernam-keystream-{}", chunk_index);
 
-            let hk = Hkdf::<Sha256>::new(Some(b"zks-infinite-key-v1"), &self.swarm_seed);
+            let hk = Hkdf::<Sha256>::new(Some(b"zks-infinite-key-v1"), &*self.swarm_seed);
             let mut chunk = vec![0u8; chunk_size];
             hk.expand(context.as_bytes(), &mut chunk)
                 .expect("HKDF expansion should not fail");
@@ -149,10 +255,25 @@ impl WasifVernam {
 
     /// Encrypt data using True Wasif-Vernam (Infinite Key XOR + ChaCha20-Poly1305)
     /// Returns: [Nonce (12 bytes) | Key Offset (8 bytes) | Ciphertext (N bytes) | Tag (16 bytes)]
-    pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
-        // Generate unique nonce
+    pub fn encrypt(&mut self, data: &[u8]) -> Result<Vec<u8>, chacha20poly1305::aead::Error> {
+        // Generate unique nonce and get counter
         let mut nonce_bytes = [0u8; 12];
         let counter = self.nonce_counter.fetch_add(1, Ordering::SeqCst);
+        
+        // Check if we should rotate keys (every 1000 messages or based on key chain)
+        if let Some(ref mut chain) = self.key_chain {
+            if counter % 1000 == 0 && counter > 0 {
+                // Generate fresh entropy for key rotation
+                let mut entropy = [0u8; 32];
+                getrandom::getrandom(&mut entropy)
+                    .expect("CRITICAL: Failed to generate entropy for key rotation");
+                
+                let new_key = chain.advance(&entropy);
+                self.update_cipher_key(new_key);
+                entropy.zeroize();
+            }
+        }
+        
         nonce_bytes[4..].copy_from_slice(&counter.to_be_bytes());
         getrandom::getrandom(&mut nonce_bytes[0..4])
             .expect("CRITICAL: Failed to generate random nonce - RNG unavailable");
@@ -182,6 +303,16 @@ impl WasifVernam {
         // 2. Base Layer: Encrypt with ChaCha20-Poly1305
         let mut ciphertext = self.cipher.encrypt(nonce, mixed_data.as_slice())?;
 
+        // 3. Citadel Scrambling: Permute ciphertext bytes to resist traffic analysis
+        if let Some(ref scrambler) = self.scrambler {
+            if ciphertext.len() == scrambler.size() {
+                scrambler.scramble(&mut ciphertext);
+            } else {
+                warn!("Ciphertext size {} doesn't match scrambler size {}, skipping scrambling", 
+                      ciphertext.len(), scrambler.size());
+            }
+        }
+
         // Build result: [Nonce (12) | Offset (8) | Ciphertext]
         let mut result = Vec::with_capacity(12 + 8 + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
@@ -205,10 +336,20 @@ impl WasifVernam {
                 .try_into()
                 .map_err(|_| chacha20poly1305::aead::Error)?,
         );
-        let ciphertext = &data[20..];
+        let mut ciphertext = data[20..].to_vec();
 
-        // 1. Base Layer: Decrypt with ChaCha20-Poly1305
-        let mut plaintext = self.cipher.decrypt(nonce, ciphertext)?;
+        // 1. Citadel Unscrambling: Reverse permutation before decryption
+        if let Some(ref scrambler) = self.scrambler {
+            if ciphertext.len() == scrambler.size() {
+                scrambler.unscramble(&mut ciphertext);
+            } else {
+                warn!("Ciphertext size {} doesn't match scrambler size {}, skipping unscrambling", 
+                      ciphertext.len(), scrambler.size());
+            }
+        }
+
+        // 2. Base Layer: Decrypt with ChaCha20-Poly1305
+        let mut plaintext = self.cipher.decrypt(nonce, ciphertext.as_slice())?;
 
         // 2. True Vernam Layer: XOR with infinite keystream
         if self.has_swarm_entropy && key_offset > 0 {
@@ -387,7 +528,7 @@ impl WasifVernam {
         // Hash to get seed
         let mut hasher = Sha256::new();
         hasher.update(&entropy);
-        self.swarm_seed = hasher.finalize().into();
+        self.swarm_seed = Zeroizing::new(hasher.finalize().into());
         self.has_swarm_entropy = true;
         self.key_offset.store(0, Ordering::SeqCst); // Reset offset for new seed
 
@@ -402,7 +543,7 @@ impl WasifVernam {
         if !key.is_empty() {
             let mut hasher = Sha256::new();
             hasher.update(&key);
-            self.swarm_seed = hasher.finalize().into();
+            self.swarm_seed = Zeroizing::new(hasher.finalize().into());
             self.has_swarm_entropy = true;
             self.key_offset.store(0, Ordering::SeqCst);
             info!(
@@ -416,7 +557,7 @@ impl WasifVernam {
     #[allow(dead_code)]
     pub fn get_remote_key(&self) -> &[u8] {
         if self.has_swarm_entropy {
-            &self.swarm_seed
+            &*self.swarm_seed
         } else {
             &[]
         }
@@ -431,7 +572,7 @@ impl WasifVernam {
     /// Get the swarm seed as a fixed-size array (for True Vernam fetcher)
     #[allow(dead_code)]
     pub fn get_swarm_seed(&self) -> [u8; 32] {
-        self.swarm_seed
+        *self.swarm_seed
     }
 
     /// Refresh the swarm seed by mixing in new entropy (FORWARD SECRECY)
@@ -453,7 +594,7 @@ impl WasifVernam {
 
         // Combine old seed with fresh entropy
         let mut input = Vec::with_capacity(32 + fresh_entropy.len() + 8);
-        input.extend_from_slice(&self.swarm_seed);
+        input.extend_from_slice(&*self.swarm_seed);
         input.extend_from_slice(fresh_entropy);
 
         // Add current offset as "generation" to prevent replay
@@ -467,7 +608,7 @@ impl WasifVernam {
             .expect("HKDF expansion should not fail");
 
         // Update seed (old seed is now unreachable - forward secrecy!)
-        self.swarm_seed = new_seed;
+        self.swarm_seed = Zeroizing::new(new_seed);
         self.has_swarm_entropy = true;
 
         // NOTE: We do NOT reset key_offset - the new keystream continues from current position
@@ -576,7 +717,7 @@ pub struct P2PRelay {
     /// Room ID
     pub room_id: String,
     /// Shared secret for file transfer
-    pub shared_secret: [u8; 32],
+    pub shared_secret: Zeroizing<[u8; 32]>,
     /// Our Peer ID assigned by relay  
     pub peer_id: String,
     /// Key Exchange state
@@ -588,6 +729,11 @@ pub struct P2PRelay {
     pub remote_peer_info: Arc<Mutex<Option<(String, Vec<String>)>>>,
     /// Direct P2P data stream (DCUtR) - if set, data will be sent here instead of WebSocket
     pub data_stream: Arc<Mutex<Option<libp2p::Stream>>>,
+    /// NAT signal receiver - receives NAT signaling text messages from the relay
+    /// Used by SwarmConnection to coordinate NAT traversal
+    pub nat_signal_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<String>>>>,
+    /// NAT signal sender - used internally to forward text messages to nat_signal_rx
+    nat_signal_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
 }
 
 #[allow(dead_code)]
@@ -759,6 +905,9 @@ impl P2PRelay {
         // Initialize keys
         let keys = Arc::new(Mutex::new(WasifVernam::new([0u8; 32], Vec::new())));
 
+        // Create NAT signaling channel for forwarding text messages
+        let (nat_signal_tx, nat_signal_rx) = tokio::sync::mpsc::channel::<String>(100);
+
         // Create P2PRelay instance immediately
         let relay = Self {
             writer: writer.clone(),
@@ -766,12 +915,14 @@ impl P2PRelay {
             keys: keys.clone(),
             role,
             room_id: room_id.to_string(),
-            shared_secret: [0u8; 32], // Initial empty secret, will be updated
+            shared_secret: Zeroizing::new([0u8; 32]), // Initial empty secret, will be updated
             peer_id: my_peer_id.clone(),
             key_exchange: key_exchange.clone(),
             key_exchange_complete: Arc::new(AtomicBool::new(false)),
             remote_peer_info: Arc::new(Mutex::new(None)),
             data_stream: Arc::new(Mutex::new(None)),
+            nat_signal_rx: Arc::new(Mutex::new(Some(nat_signal_rx))),
+            nat_signal_tx: Arc::new(Mutex::new(Some(nat_signal_tx))),
         };
         let relay_arc = Arc::new(relay);
 
@@ -957,7 +1108,7 @@ impl P2PRelay {
 
         // Encrypt with Wasif Vernam (ChaCha20-Poly1305)
         let encrypted = {
-            let keys = self.keys.lock().await;
+            let mut keys = self.keys.lock().await;
             keys.encrypt(&encoded).map_err(|_| "Encryption failed")?
         };
 
@@ -1359,7 +1510,7 @@ impl P2PRelay {
 
                 // Encrypt padding
                 let encrypted = {
-                    let keys_guard = keys.lock().await;
+                    let mut keys_guard = keys.lock().await;
                     if let Ok(enc) = keys_guard.encrypt(&padding) {
                         enc
                     } else {
